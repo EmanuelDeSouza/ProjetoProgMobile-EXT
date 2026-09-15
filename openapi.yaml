@@ -1,0 +1,558 @@
+openapi: 3.0.3
+info:
+  title: CuidaLar API
+  version: "1.0"
+  description: >
+    Contrato HTTP entre o app (cuidador e morador) e o servidor.
+    Comunicação com dispositivos IoT é via MQTT e está descrita em docs/SPEC.md secao 6.3, não aqui.
+servers:
+  - url: http://localhost:3000/v1
+    description: Local
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Saúde do servidor
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /auth:
+    post:
+      operationId: postAuth
+      summary: Login do cuidador (e-mail/senha ou Google)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [metodo]
+              properties:
+                metodo: { type: string, enum: [senha, google] }
+                email: { type: string, format: email }
+                senha: { type: string }
+                idToken: { type: string, description: "obrigatório se metodo=google" }
+      responses:
+        "200":
+          description: Login OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  usuario: { $ref: "#/components/schemas/Usuario" }
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /me:
+    get:
+      operationId: getMe
+      summary: Usuário autenticado
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Usuario"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /residencias:
+    get:
+      operationId: getMinhasResidencias
+      summary: Residências do cuidador autenticado, com papel
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ResidenciaComPapel"
+    post:
+      operationId: postResidencia
+      summary: Criar residência
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nome]
+              properties:
+                nome: { type: string }
+                enderecoCurto: { type: string }
+      responses:
+        "201":
+          description: Criada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Residencia" }
+        "400":
+          $ref: "#/components/responses/Error"
+
+  /residencias/{id}/convites:
+    post:
+      operationId: postConvite
+      summary: Convidar outro cuidador
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "201":
+          description: Convite criado
+        "403":
+          $ref: "#/components/responses/Error"
+
+  /convites/{id}:
+    patch:
+      operationId: patchConvite
+      summary: Aceitar convite
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [aceito] }
+      responses:
+        "200":
+          description: OK
+
+  /residencias/{id}/moradores:
+    post:
+      operationId: postMorador
+      summary: Cadastrar perfil de morador com PIN
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nome, pin]
+              properties:
+                nome: { type: string }
+                pin: { type: string, pattern: "^[0-9]{4}$" }
+      responses:
+        "201":
+          description: Criado
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Morador" }
+
+  /moradores/login-pin:
+    post:
+      operationId: postLoginPin
+      summary: Login simplificado do morador
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [moradorId, pin]
+              properties:
+                moradorId: { type: string }
+                pin: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  morador: { $ref: "#/components/schemas/Morador" }
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          description: Bloqueado temporariamente por tentativas erradas (RNF-08)
+
+  /residencias/{id}/dispositivos/parear:
+    post:
+      operationId: postPareamento
+      summary: Parear dispositivo com código gerado pelo firmware
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [codigo, tipo, nome, comodo]
+              properties:
+                codigo: { type: string, description: "código de 6 dígitos exibido pelo dispositivo" }
+                tipo:
+                  type: string
+                  enum: [sensor_presenca, sensor_contato, sensor_temperatura, atuador_tomada, botao_sos]
+                nome: { type: string }
+                comodo: { type: string }
+      responses:
+        "201":
+          description: Pareado
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Dispositivo" }
+        "409":
+          description: Código expirado ou já usado
+
+  /residencias/{id}/dispositivos:
+    get:
+      operationId: listDispositivos
+      summary: Painel — dispositivos da residência com estado atual
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Dispositivo" }
+
+  /dispositivos/{id}/comando:
+    post:
+      operationId: postComandoDispositivo
+      summary: Enviar comando a um atuador
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [acao]
+              properties:
+                acao: { type: string, example: "ligar" }
+      responses:
+        "202":
+          description: Comando enviado, aguardando confirmação do dispositivo via MQTT
+        "409":
+          description: Dispositivo offline, comando recusado antes de enviar
+
+  /dispositivos/{id}/eventos:
+    get:
+      operationId: listEventosDispositivo
+      summary: Histórico de eventos (últimos 7 dias)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/EventoDispositivo" }
+
+  /residencias/{id}/regras:
+    get:
+      operationId: listRegras
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RegraAlerta" }
+    post:
+      operationId: postRegraAlerta
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dispositivoId, condicao, parametros]
+              properties:
+                dispositivoId: { type: string }
+                condicao:
+                  type: string
+                  enum: [sem_movimento_por, contato_aberto_apos_horario, temperatura_fora_da_faixa, dispositivo_offline]
+                parametros: { type: object }
+      responses:
+        "201":
+          description: Criada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegraAlerta" }
+
+  /residencias/{id}/alertas:
+    get:
+      operationId: listAlertas
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Alerta" }
+
+  /alertas/{id}:
+    patch:
+      operationId: patchAlerta
+      summary: Reconhecer alerta
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [reconhecido] }
+                nota: { type: string }
+      responses:
+        "200":
+          description: OK
+
+  /residencias/{id}/sos:
+    post:
+      operationId: postSOS
+      summary: Acionar SOS pelo app do morador
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [moradorId]
+              properties:
+                moradorId: { type: string }
+      responses:
+        "201":
+          description: SOS registrado, notificação disparada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SOSEvento" }
+
+  /sos/{id}:
+    patch:
+      operationId: patchSOS
+      summary: Cancelar SOS acidental (até 30s depois)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [cancelado_pelo_morador] }
+      responses:
+        "200":
+          description: OK
+        "409":
+          description: Fora da janela de 30s para cancelamento
+
+  /notificacoes:
+    get:
+      operationId: listNotificacoes
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Notificacao" }
+
+  /notificacoes/{id}:
+    patch:
+      operationId: patchNotificacao
+      summary: Marcar como lida
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lida: { type: boolean }
+      responses:
+        "200":
+          description: OK
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    ResidenciaId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    Error:
+      description: Erro padrão
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+                  fields: { type: object }
+
+  schemas:
+    Usuario:
+      type: object
+      properties:
+        id: { type: string }
+        nome: { type: string }
+        email: { type: string }
+
+    Residencia:
+      type: object
+      properties:
+        id: { type: string }
+        nome: { type: string }
+        enderecoCurto: { type: string }
+
+    ResidenciaComPapel:
+      allOf:
+        - $ref: "#/components/schemas/Residencia"
+        - type: object
+          properties:
+            papel: { type: string, enum: [dono, cuidador] }
+
+    Morador:
+      type: object
+      properties:
+        id: { type: string }
+        nome: { type: string }
+        residenciaId: { type: string }
+
+    Dispositivo:
+      type: object
+      properties:
+        id: { type: string }
+        tipo:
+          type: string
+          enum: [sensor_presenca, sensor_contato, sensor_temperatura, atuador_tomada, botao_sos]
+        nome: { type: string }
+        comodo: { type: string }
+        estadoAtual: { type: object }
+        status: { type: string, enum: [online, offline] }
+        ultimoContatoEm: { type: string, format: date-time }
+
+    EventoDispositivo:
+      type: object
+      properties:
+        id: { type: string }
+        tipo: { type: string }
+        valor: { type: object }
+        createdAt: { type: string, format: date-time }
+
+    RegraAlerta:
+      type: object
+      properties:
+        id: { type: string }
+        dispositivoId: { type: string }
+        condicao: { type: string }
+        parametros: { type: object }
+        ativa: { type: boolean }
+
+    Alerta:
+      type: object
+      properties:
+        id: { type: string }
+        dispositivoId: { type: string }
+        regraId: { type: string }
+        severidade: { type: string, enum: [baixa, media, alta] }
+        status: { type: string, enum: [aberto, reconhecido] }
+        createdAt: { type: string, format: date-time }
+
+    SOSEvento:
+      type: object
+      properties:
+        id: { type: string }
+        moradorId: { type: string }
+        origem: { type: string, enum: [app, botao_fisico] }
+        status: { type: string, enum: [aberto, cancelado_pelo_morador, reconhecido] }
+        createdAt: { type: string, format: date-time }
+
+    Notificacao:
+      type: object
+      properties:
+        id: { type: string }
+        tipo: { type: string }
+        alvoId: { type: string }
+        lidaEm: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
