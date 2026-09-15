@@ -1,0 +1,27 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+api/.env
+api/.env.*
+!api/.env.example
+
+# Dependencies
+node_modules/
+.bun/
+
+# Build and temporary files
+dist/
+build/
+.expo/
+*.log
+
+# Docker / Mosquitto volumes
+mosquitto/data/
+mosquitto/log/
+
+# OS and IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
