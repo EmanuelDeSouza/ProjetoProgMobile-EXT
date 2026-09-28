@@ -9,7 +9,9 @@
     "test": "bun test",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "db:seed": "bun scripts/seed.ts",
+    "iot:simulate": "bun scripts/simulate-iot.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.38.4",

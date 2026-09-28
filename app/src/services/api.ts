@@ -13,9 +13,20 @@ import {
   type TipoDispositivo,
   type CondicaoRegra,
 } from "../types";
+import { Platform } from "react-native";
 import { setCacheItem, getCacheItem } from "./cache";
 
-const BASE_URL = "http://localhost:3000/v1";
+let baseUrl =
+  process.env.EXPO_PUBLIC_API_URL ||
+  (Platform.OS === "android" ? "http://10.0.2.2:3000/v1" : "http://localhost:3000/v1");
+
+export function setApiBaseUrl(url: string) {
+  baseUrl = url;
+}
+
+export function getApiBaseUrl(): string {
+  return baseUrl;
+}
 
 let authToken: string | null = null;
 
@@ -56,7 +67,7 @@ async function request<T>(
   }
 
   try {
-    const res = await fetch(`${BASE_URL}${path}`, {
+    const res = await fetch(`${baseUrl}${path}`, {
       ...options,
       headers,
     });
