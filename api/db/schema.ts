@@ -276,3 +276,16 @@ export const notificacoesRelations = relations(notificacoes, ({ one }) => ({
     references: [usuarios.id],
   }),
 }));
+
+export type Usuario = typeof usuarios.$inferSelect;
+export type Residencia = typeof residencias.$inferSelect;
+export type ResidenciaMembro = typeof residenciaMembros.$inferSelect;
+export type Morador = typeof moradores.$inferSelect;
+export type Convite = typeof convites.$inferSelect;
+export type Dispositivo = typeof dispositivos.$inferSelect;
+export type RegraAlerta = typeof regrasAlerta.$inferSelect;
+export type Alerta = typeof alertas.$inferSelect;
+export type SosEvento = typeof sosEventos.$inferSelect;
+export type EventoDispositivo = typeof eventosDispositivo.$inferSelect;
+export type Notificacao = typeof notificacoes.$inferSelect;
+
