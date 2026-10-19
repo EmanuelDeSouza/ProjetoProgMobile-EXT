@@ -132,18 +132,19 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xxs,
   },
   input: {
-    ...typography.bodyMd,
-    height: 48,
+    ...typography.bodyLg,
+    height: 52, // DESIGN.md: text-input height 52px
     borderWidth: 1,
-    borderColor: colors.line,
+    borderColor: colors.lineStrong,
     borderRadius: rounded.sm,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.paper,
     color: colors.ink,
     marginBottom: spacing.lg,
   },
   btnEnviar: {
     height: 48,
+    minHeight: 48,
     backgroundColor: colors.primary,
     borderRadius: rounded.sm,
     justifyContent: "center",

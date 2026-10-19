@@ -106,6 +106,8 @@ const styles = StyleSheet.create({
   btnVoltar: {
     paddingVertical: spacing.xs,
     marginBottom: spacing.xs,
+    minHeight: 48,
+    justifyContent: "center",
   },
   btnVoltarText: {
     ...typography.caption,

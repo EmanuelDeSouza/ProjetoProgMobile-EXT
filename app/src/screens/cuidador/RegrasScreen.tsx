@@ -306,6 +306,10 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     paddingHorizontal: spacing.md,
     borderRadius: rounded.sm,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
+    alignItems: "center",
   },
   btnNovaText: {
     ...typography.buttonMd,
@@ -344,6 +348,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
     backgroundColor: colors.paper,
+    minHeight: 48,
+    justifyContent: "center",
   },
   dispChipActive: {
     borderColor: colors.primary,
@@ -364,6 +370,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
     backgroundColor: colors.paper,
+    minHeight: 48,
+    justifyContent: "center",
   },
   condChipActive: {
     borderColor: colors.primary,
@@ -378,18 +386,19 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   input: {
-    ...typography.bodyMd,
-    height: 48,
+    ...typography.bodyLg,
+    height: 52, // DESIGN.md: text-input height 52px
     borderWidth: 1,
-    borderColor: colors.line,
+    borderColor: colors.lineStrong,
     borderRadius: rounded.sm,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.paper,
     color: colors.ink,
     marginBottom: spacing.sm,
   },
   btnSalvar: {
     height: 48,
+    minHeight: 48,
     backgroundColor: colors.primary,
     borderRadius: rounded.sm,
     justifyContent: "center",

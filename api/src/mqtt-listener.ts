@@ -84,7 +84,11 @@ export async function handleMqttMessage(topic: string, messageBuffer: Buffer) {
       .returning();
 
     if (sosCreated) {
-      await notifyCaregivers(residenciaId, "sos", sosCreated.id);
+      await notifyCaregivers(residenciaId, "sos", sosCreated.id, {
+        severidade: "alta",
+        titulo: "🚨 ALERTA SOS - Botão Físico",
+        mensagem: "Botão de emergência acionado na residência.",
+      });
     }
   }
 }

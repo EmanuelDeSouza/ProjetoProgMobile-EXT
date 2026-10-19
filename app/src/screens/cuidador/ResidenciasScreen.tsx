@@ -158,6 +158,10 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     paddingHorizontal: spacing.md,
     borderRadius: rounded.sm,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
+    alignItems: "center",
   },
   btnNovaText: {
     ...typography.buttonMd,
@@ -177,12 +181,12 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   input: {
-    ...typography.bodyMd,
-    height: 48,
+    ...typography.bodyLg,
+    height: 52, // DESIGN.md: text-input height 52px
     borderWidth: 1,
-    borderColor: colors.line,
+    borderColor: colors.lineStrong,
     borderRadius: rounded.sm,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.paper,
     color: colors.ink,
     marginBottom: spacing.sm,
@@ -194,6 +198,7 @@ const styles = StyleSheet.create({
   },
   buttonPrimary: {
     height: 48,
+    minHeight: 48,
     paddingHorizontal: spacing.md,
     backgroundColor: colors.primary,
     borderRadius: rounded.sm,
@@ -206,6 +211,7 @@ const styles = StyleSheet.create({
   },
   buttonSecondary: {
     height: 48,
+    minHeight: 48,
     paddingHorizontal: spacing.md,
     backgroundColor: "transparent",
     borderWidth: 1,

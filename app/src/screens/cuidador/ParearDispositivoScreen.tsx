@@ -200,12 +200,12 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
   input: {
-    ...typography.bodyMd,
-    height: 48,
+    ...typography.bodyLg,
+    height: 52, // DESIGN.md: text-input height 52px
     borderWidth: 1,
-    borderColor: colors.line,
+    borderColor: colors.lineStrong,
     borderRadius: rounded.sm,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.paper,
     color: colors.ink,
     marginBottom: spacing.md,
@@ -220,6 +220,8 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
     borderRadius: rounded.sm,
     backgroundColor: colors.paper,
+    minHeight: 48, // DESIGN.md: alvo de toque >= 48px
+    justifyContent: "center",
   },
   tipoCardSelected: {
     borderColor: colors.primary,
@@ -235,6 +237,7 @@ const styles = StyleSheet.create({
   },
   btnConfirmar: {
     height: 48,
+    minHeight: 48,
     backgroundColor: colors.primary,
     borderRadius: rounded.sm,
     justifyContent: "center",

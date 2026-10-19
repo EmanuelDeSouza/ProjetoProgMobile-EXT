@@ -270,6 +270,8 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: spacing.sm,
     alignItems: "center",
+    justifyContent: "center",
+    minHeight: 48, // DESIGN.md: alvo de toque >= 48px
   },
   tabActive: {
     borderBottomWidth: 2,
@@ -337,6 +339,9 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     paddingHorizontal: spacing.sm,
     borderRadius: rounded.sm,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
     alignItems: "center",
   },
   btnTudoBemText: {
@@ -351,6 +356,9 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     paddingHorizontal: spacing.sm,
     borderRadius: rounded.sm,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
     alignItems: "center",
   },
   btnEscalarText: {
@@ -362,12 +370,12 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   inputNota: {
-    ...typography.bodyMd,
-    height: 44,
+    ...typography.bodyLg,
+    height: 52, // DESIGN.md: text-input height 52px
     borderWidth: 1,
-    borderColor: colors.line,
+    borderColor: colors.lineStrong,
     borderRadius: rounded.sm,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.paper,
     color: colors.ink,
   },
@@ -376,6 +384,10 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     paddingHorizontal: spacing.md,
     borderRadius: rounded.sm,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
+    alignItems: "center",
   },
   btnActionPrimaryText: {
     ...typography.buttonMd,
@@ -384,6 +396,10 @@ const styles = StyleSheet.create({
   btnActionSecondary: {
     paddingVertical: spacing.xs,
     paddingHorizontal: spacing.sm,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
+    alignItems: "center",
   },
   btnActionSecondaryText: {
     ...typography.buttonMd,

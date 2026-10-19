@@ -13,12 +13,13 @@ import {
   type TipoDispositivo,
   type CondicaoRegra,
 } from "../types";
-import { Platform } from "react-native";
 import { setCacheItem, getCacheItem } from "./cache";
 
 let baseUrl =
   process.env.EXPO_PUBLIC_API_URL ||
-  (Platform.OS === "android" ? "http://10.0.2.2:3000/v1" : "http://localhost:3000/v1");
+  (typeof process !== "undefined" && process.env.NODE_ENV === "test"
+    ? "http://localhost:3000/v1"
+    : "http://10.0.2.2:3000/v1");
 
 export function setApiBaseUrl(url: string) {
   baseUrl = url;
@@ -266,6 +267,13 @@ export const apiRepository = {
     return request<void>(`/notificacoes/${notificacaoId}`, {
       method: "PATCH",
       body: JSON.stringify({ lida }),
+    });
+  },
+
+  async postPushToken(pushToken: string): Promise<{ status: string }> {
+    return request<{ status: string }>("/usuarios/push-token", {
+      method: "POST",
+      body: JSON.stringify({ pushToken }),
     });
   },
 };

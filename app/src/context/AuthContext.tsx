@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 import { type Usuario, type Morador } from "../types";
 import { apiRepository, setAuthToken } from "../services/api";
 import { setCacheItem, getCacheItem } from "../services/cache";
+import { registerPushNotifications, setupNotificationChannels } from "../services/notifications";
 
 interface AuthContextData {
   user: Usuario | null;
@@ -38,6 +39,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           setRole(storedRole);
           if (storedRole === "cuidador" && storedUser) {
             setUser(storedUser);
+            setupNotificationChannels().catch(() => {});
+            registerPushNotifications().catch(() => {});
           } else if (storedRole === "morador" && storedMorador) {
             setMorador(storedMorador);
           }
@@ -60,6 +63,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     await setCacheItem("auth_token", res.token);
     await setCacheItem("auth_role", "cuidador");
     await setCacheItem("auth_user", res.usuario);
+    setupNotificationChannels().catch(() => {});
+    registerPushNotifications().catch(() => {});
   };
 
   const loginGoogle = async (idToken: string) => {
@@ -71,6 +76,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     await setCacheItem("auth_token", res.token);
     await setCacheItem("auth_role", "cuidador");
     await setCacheItem("auth_user", res.usuario);
+    setupNotificationChannels().catch(() => {});
+    registerPushNotifications().catch(() => {});
   };
 
   const loginMorador = async (moradorId: string, pin: string) => {

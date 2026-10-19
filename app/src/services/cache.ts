@@ -32,3 +32,10 @@ export async function getCacheItem<T>(key: string): Promise<T | null> {
     return null;
   }
 }
+
+export async function clearCache(): Promise<void> {
+  if (typeof localStorage !== "undefined") {
+    localStorage.clear();
+  }
+  memoryCache.clear();
+}

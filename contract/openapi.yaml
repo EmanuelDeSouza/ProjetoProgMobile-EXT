@@ -72,6 +72,35 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
 
+  /usuarios/push-token:
+    post:
+      operationId: postPushToken
+      summary: Registrar token push do cuidador para notificações nativas
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pushToken]
+              properties:
+                pushToken: { type: string, example: "ExponentPushToken[xxxxxx]" }
+      responses:
+        "200":
+          description: Token push registrado com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+
   /residencias:
     get:
       operationId: getMinhasResidencias

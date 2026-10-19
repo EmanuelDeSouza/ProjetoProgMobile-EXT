@@ -154,18 +154,19 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   input: {
-    ...typography.bodyMd,
-    height: 48,
+    ...typography.bodyLg,
+    height: 52, // DESIGN.md: text-input height 52px
     borderWidth: 1,
-    borderColor: colors.line,
+    borderColor: colors.lineStrong,
     borderRadius: rounded.sm,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.paper,
     color: colors.ink,
     marginBottom: spacing.md,
   },
   buttonPrimary: {
     height: 48,
+    minHeight: 48,
     backgroundColor: colors.primary,
     borderRadius: rounded.sm,
     justifyContent: "center",
@@ -178,6 +179,7 @@ const styles = StyleSheet.create({
   },
   buttonSecondary: {
     height: 48,
+    minHeight: 48,
     backgroundColor: "transparent",
     borderWidth: 1,
     borderColor: colors.line,
@@ -196,11 +198,13 @@ const styles = StyleSheet.create({
     marginVertical: spacing.lg,
   },
   moradorSwitchButton: {
+    minHeight: 48, // DESIGN.md: alvo de toque >= 48px
+    justifyContent: "center",
     alignItems: "center",
     paddingVertical: spacing.xs,
   },
   moradorSwitchText: {
-    ...typography.bodyMd,
+    ...typography.bodyLg,
     color: colors.primary,
     fontWeight: "600",
   },

@@ -81,6 +81,10 @@ export const patchNotificacaoSchema = z.object({
   lida: z.boolean().optional(),
 });
 
+export const postPushTokenSchema = z.object({
+  pushToken: z.string().min(1, "pushToken é obrigatório"),
+});
+
 // Helper for formatting standard errors according to Section 5.2
 export function formatErrorResponse(
   code: string,

@@ -40,8 +40,12 @@ export async function handlePostSOS(
     );
   }
 
-  // Dispara notificação imediata a todos os cuidadores
-  await notifyCaregivers(residenciaId, "sos", sos.id);
+  // Dispara notificação imediata a todos os cuidadores (RF-15: notificação de prioridade máxima por push)
+  await notifyCaregivers(residenciaId, "sos", sos.id, {
+    severidade: "alta",
+    titulo: "🚨 ALERTA SOS - Emergência!",
+    mensagem: "Pedido de ajuda acionado via aplicativo pelo morador.",
+  });
 
   return Response.json(
     {

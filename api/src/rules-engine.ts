@@ -6,17 +6,30 @@ import {
   notificacoes,
   regrasAlerta,
   residenciaMembros,
+  usuarios,
   type RegraAlerta,
 } from "../db/schema";
+import { sendNativePushNotification } from "./services/push";
+
+export interface NotifyCaregiversOptions {
+  severidade?: "baixa" | "media" | "alta";
+  titulo?: string;
+  mensagem?: string;
+}
 
 export async function notifyCaregivers(
   residenciaId: string,
   tipo: "alerta" | "sos",
-  alvoId: string
+  alvoId: string,
+  options?: NotifyCaregiversOptions
 ) {
   const membros = await db
-    .select()
+    .select({
+      usuarioId: residenciaMembros.usuarioId,
+      pushToken: usuarios.pushToken,
+    })
     .from(residenciaMembros)
+    .leftJoin(usuarios, eq(residenciaMembros.usuarioId, usuarios.id))
     .where(eq(residenciaMembros.residenciaId, residenciaId));
 
   const recordsToInsert = membros.map((membro) => ({
@@ -27,6 +40,49 @@ export async function notifyCaregivers(
 
   if (recordsToInsert.length > 0) {
     await db.insert(notificacoes).values(recordsToInsert);
+  }
+
+  // Push Nativo Obrigatório para SOS e Alertas de Alta Severidade (RF-15, RF-17, RNF-02)
+  const isSos = tipo === "sos";
+  const isHighAlert = tipo === "alerta" && options?.severidade === "alta";
+  const isMediumAlert = tipo === "alerta" && options?.severidade === "media";
+
+  if (isSos || isHighAlert || isMediumAlert) {
+    const tokens = membros
+      .map((m) => m.pushToken)
+      .filter((t): t is string => Boolean(t && t.trim().length > 0));
+
+    if (tokens.length > 0) {
+      const title =
+        options?.titulo ||
+        (isSos
+          ? "🚨 ALERTA SOS - Emergência!"
+          : isHighAlert
+          ? "⚠️ Alerta de Segurança"
+          : "Aviso de Monitoramento");
+
+      const body =
+        options?.mensagem ||
+        (isSos
+          ? "Pedido de socorro acionado na residência. Verifique imediatamente."
+          : isHighAlert
+          ? "Alerta crítico disparado pelos sensores da residência."
+          : "Notificação de evento na residência.");
+
+      await sendNativePushNotification({
+        to: tokens,
+        title,
+        body,
+        priority: isSos || isHighAlert ? "high" : "normal",
+        channelId: isSos ? "sos-critical" : isHighAlert ? "alertas-alta" : "alertas-geral",
+        data: {
+          tipo,
+          alvoId,
+          residenciaId,
+          severidade: options?.severidade || (isSos ? "alta" : "media"),
+        },
+      });
+    }
   }
 }
 
@@ -158,7 +214,7 @@ export async function checkRule(
         .returning();
 
       if (createdAlerta) {
-        await notifyCaregivers(residenciaId, "alerta", createdAlerta.id);
+        await notifyCaregivers(residenciaId, "alerta", createdAlerta.id, { severidade });
       }
     }
   }
@@ -210,7 +266,11 @@ export async function runPeriodicRuleChecks() {
             .returning();
 
           if (created) {
-            await notifyCaregivers(disp.residenciaId, "alerta", created.id);
+            await notifyCaregivers(disp.residenciaId, "alerta", created.id, {
+              severidade: "alta",
+              titulo: "⚠️ Dispositivo Crítico Offline",
+              mensagem: "Dispositivo crítico sem contato há mais de 15 minutos.",
+            });
           }
         }
       }

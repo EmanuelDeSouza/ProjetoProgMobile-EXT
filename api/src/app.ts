@@ -2,6 +2,7 @@ import { verifyAuthToken, type TokenPayload } from "./auth";
 import { formatErrorResponse } from "./schemas";
 import { handleHealth } from "./routes/health";
 import { handleAuth, handleMe } from "./routes/auth";
+import { handlePostPushToken } from "./routes/usuarios";
 import {
   handleGetMinhasResidencias,
   handlePostResidencia,
@@ -91,6 +92,11 @@ export async function handleRequest(req: Request): Promise<Response> {
     // /v1/me
     if (method === "GET" && path === "/v1/me") {
       return withCors(await handleMe(userId));
+    }
+
+    // /v1/usuarios/push-token
+    if (method === "POST" && path === "/v1/usuarios/push-token") {
+      return withCors(await handlePostPushToken(req, userId));
     }
 
     // /v1/residencias

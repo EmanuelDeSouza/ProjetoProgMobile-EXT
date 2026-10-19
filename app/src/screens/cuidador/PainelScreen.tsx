@@ -338,6 +338,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
     alignItems: "center",
+    justifyContent: "center",
+    minHeight: 48, // DESIGN.md: alvo de toque >= 48px
   },
   quickBtnText: {
     ...typography.caption,
@@ -430,7 +432,10 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     paddingHorizontal: spacing.md,
     borderRadius: rounded.sm,
-    minWidth: 80,
+    minWidth: 88,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
     alignItems: "center",
   },
   btnControleDisabled: {
@@ -447,6 +452,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
     borderRadius: rounded.sm,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
+    alignItems: "center",
   },
   btnHistoricoText: {
     ...typography.caption,
@@ -473,6 +482,10 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.lg,
     borderRadius: rounded.sm,
+    height: 48,
+    minHeight: 48,
+    justifyContent: "center",
+    alignItems: "center",
   },
   btnParearEmptyText: {
     ...typography.buttonMd,
@@ -482,7 +495,7 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   skeletonCard: {
-    height: 100,
+    height: 96, // DESIGN.md: skeleton-card height 96px
     backgroundColor: colors.paperDeep,
     borderRadius: rounded.md,
   },
