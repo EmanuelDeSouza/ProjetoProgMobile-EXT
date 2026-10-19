@@ -44,3 +44,14 @@ cuidalar/{residencia_id}/{dispositivo_id}/sos         — Dispositivo publica em
 - `sensor_temperatura/`: Firmware para medição de temperatura e umidade (DHT22)
 - `atuador_tomada/`: Firmware para acionamento de relé com confirmação de estado
 - `botao_sos/`: Firmware para botão físico dedicado de emergência com QoS 1
+- `simulator.ts`: Simulador em TypeScript/Bun para testar toda a malha MQTT sem placas físicas
+
+## Como executar o Simulador de Dispositivos
+
+Para testar o fluxo de ponta a ponta sem placas físicas ESP32:
+
+```bash
+# Executa o simulador conectando ao broker Mosquitto local
+bun iot/simulator.ts
+```
+

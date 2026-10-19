@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "CuidaLar",
+    "slug": "cuidalar-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "primaryColor": "#0F6B5C",
+    "splash": {
+      "backgroundColor": "#FAFAF8",
+      "resizeMode": "contain"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "br.com.setrem.cuidalar"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#FAFAF8"
+      },
+      "package": "br.com.setrem.cuidalar"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
