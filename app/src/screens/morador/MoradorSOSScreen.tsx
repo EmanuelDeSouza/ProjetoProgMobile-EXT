@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -19,35 +19,42 @@ export const MoradorSOSScreen: React.FC<MoradorSOSScreenProps> = ({ onDismiss })
   const { morador } = useAuth();
   const [sosEvento, setSosEvento] = useState<SOSEvento | null>(null);
   const [loading, setLoading] = useState(true);
+  const [falhou, setFalhou] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [cancelado, setCancelado] = useState(false);
   const [secondsRemaining, setSecondsRemaining] = useState(30);
-  const [horaEnvio, setHoraEnvio] = useState("");
 
-  useEffect(() => {
-    async function disparar() {
-      if (!morador?.residenciaId || !morador?.id) return;
-      try {
-        const now = new Date();
-        const horaFormatada = now.toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-        setHoraEnvio(horaFormatada);
-
-        const evento = await apiRepository.postSOS(morador.residenciaId, morador.id);
-        setSosEvento(evento);
-      } catch (err) {
-        console.error("Erro ao disparar SOS:", err);
-      } finally {
-        setLoading(false);
+  // Só mostra "enviado" depois que o servidor criou o evento (RNF-03): a hora vem do createdAt.
+  const disparar = useCallback(async () => {
+    setLoading(true);
+    setFalhou(false);
+    try {
+      if (!morador?.residenciaId || !morador?.id) {
+        throw new Error("Sessão do morador ausente.");
       }
+      const evento = await apiRepository.postSOS(morador.residenciaId, morador.id);
+      setSosEvento(evento);
+    } catch (err) {
+      console.error("Erro ao disparar SOS:", err);
+      setFalhou(true);
+    } finally {
+      setLoading(false);
     }
-    disparar();
   }, [morador?.residenciaId, morador?.id]);
 
   useEffect(() => {
-    if (loading || cancelado) return;
+    disparar();
+  }, [disparar]);
+
+  const horaEnvio = sosEvento
+    ? new Date(sosEvento.createdAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "";
+
+  useEffect(() => {
+    if (!sosEvento || cancelado) return;
     const interval = setInterval(() => {
       setSecondsRemaining((prev) => {
         if (prev <= 1) {
@@ -59,7 +66,7 @@ export const MoradorSOSScreen: React.FC<MoradorSOSScreenProps> = ({ onDismiss })
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [loading, cancelado]);
+  }, [sosEvento, cancelado]);
 
   const handleCancelar = async () => {
     if (!sosEvento || secondsRemaining <= 0) return;
@@ -78,12 +85,43 @@ export const MoradorSOSScreen: React.FC<MoradorSOSScreenProps> = ({ onDismiss })
     <View style={styles.container}>
       <View style={styles.card}>
         <Text style={styles.iconeEmergencia}>🚨</Text>
-        <Text style={styles.titulo}>
-          {cancelado ? "Ajuda Cancelada" : "Pedido de Ajuda Enviado!"}
+        <Text style={[styles.titulo, falhou && styles.tituloErro]}>
+          {loading
+            ? "Enviando pedido de ajuda..."
+            : falhou
+            ? "Pedido de ajuda não enviado"
+            : cancelado
+            ? "Ajuda Cancelada"
+            : "Pedido de Ajuda Enviado!"}
         </Text>
 
         {loading ? (
           <ActivityIndicator size="large" color={colors.sos} style={{ marginVertical: 20 }} />
+        ) : falhou ? (
+          <>
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>
+                Não foi possível avisar a família. Tente de novo ou use o botão de emergência da
+                parede.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.btnVoltar}
+              onPress={disparar}
+              accessibilityRole="button"
+              accessibilityLabel="Tentar enviar o pedido de ajuda de novo"
+            >
+              <Text style={styles.btnVoltarText}>Tentar de novo</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.btnSecundario}
+              onPress={onDismiss}
+              accessibilityRole="button"
+              accessibilityLabel="Voltar ao painel"
+            >
+              <Text style={styles.btnSecundarioText}>Voltar ao Painel</Text>
+            </TouchableOpacity>
+          </>
         ) : cancelado ? (
           <>
             <Text style={styles.mensagem}>
@@ -162,6 +200,36 @@ const styles = StyleSheet.create({
     color: colors.sos,
     textAlign: "center",
     marginBottom: spacing.xs,
+  },
+  tituloErro: {
+    color: colors.danger,
+  },
+  errorBox: {
+    width: "100%",
+    backgroundColor: colors.dangerSoft,
+    borderRadius: rounded.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  errorText: {
+    ...typography.bodyLg,
+    color: colors.danger,
+    textAlign: "center",
+  },
+  btnSecundario: {
+    minHeight: 72,
+    width: "100%",
+    marginTop: spacing.xl,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: rounded.md,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  btnSecundarioText: {
+    ...typography.moradorBotao,
+    color: colors.ink,
   },
   mensagem: {
     ...typography.bodyLg,
