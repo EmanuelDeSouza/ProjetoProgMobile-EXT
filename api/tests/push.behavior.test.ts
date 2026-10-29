@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { handleRequest } from "../src/app";
-import { signToken } from "../src/auth";
+import { novoCuidador } from "./helpers";
 import {
   sendNativePushNotification,
   dispatchedPushNotifications,
@@ -28,11 +28,7 @@ describe("RF-15, RF-17 & RNF-02 · Push Notifications Nativas", () => {
     });
 
     it("Given cuidador autenticado, When envia payload sem pushToken ou vazio, Then retorna 400", async () => {
-      const token = await signToken({
-        sub: "user-cuidador-001",
-        email: "cuidador@exemplo.com",
-        papel: "cuidador",
-      });
+      const token = (await novoCuidador()).token;
 
       const reqEmpty = new Request("http://localhost:3000/v1/usuarios/push-token", {
         method: "POST",
@@ -52,11 +48,7 @@ describe("RF-15, RF-17 & RNF-02 · Push Notifications Nativas", () => {
     });
 
     it("Given cuidador autenticado, When envia body não JSON, Then retorna 400", async () => {
-      const token = await signToken({
-        sub: "user-cuidador-001",
-        email: "cuidador@exemplo.com",
-        papel: "cuidador",
-      });
+      const token = (await novoCuidador()).token;
 
       const reqInvalid = new Request("http://localhost:3000/v1/usuarios/push-token", {
         method: "POST",
@@ -106,7 +98,7 @@ describe("RF-15, RF-17 & RNF-02 · Push Notifications Nativas", () => {
       expect(result.count).toBe(1);
       expect(dispatchedPushNotifications.length).toBe(1);
 
-      const sent = dispatchedPushNotifications[0];
+      const sent = dispatchedPushNotifications[0]!;
       expect(sent.token).toBe(token);
       expect(sent.title).toContain("SOS");
       expect(sent.data?.tipo).toBe("sos");

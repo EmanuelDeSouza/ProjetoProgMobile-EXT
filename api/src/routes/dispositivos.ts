@@ -1,219 +1,147 @@
-import { eq, and, gt, desc } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
+import { and, desc, eq, gt, isNull, ne } from "drizzle-orm";
 import { db } from "../db";
-import { dispositivos, eventosDispositivo } from "../../db/schema";
+import { dispositivos, eventosDispositivo, pareamentos, type Dispositivo } from "../../db/schema";
+import { postComandoSchema, postPareamentoSchema } from "../schemas";
+import { carregarDispositivo, exigirAcessoResidencia, exigirCuidadorMembro } from "../authz";
+import { HttpError, idDoPath, iso, lerCorpo } from "../http";
 import {
-  postPareamentoSchema,
-  postComandoSchema,
-  formatErrorResponse,
-  formatZodError,
-} from "../schemas";
-import { sendCommandToDevice } from "../mqtt-listener";
+  mqttPronto,
+  publicarCredenciais,
+  sendCommandToDevice,
+  sincronizarCredencialDispositivo,
+} from "../mqtt-listener";
+import type { Contexto } from "../app";
 
-export async function handlePostPareamento(
-  req: Request,
-  residenciaId: string
-): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return Response.json(
-      formatErrorResponse("INVALID_JSON", "O corpo da requisição deve ser um JSON válido."),
-      { status: 400 }
-    );
-  }
-
-  const parsed = postPareamentoSchema.safeParse(body);
-  if (!parsed.success) {
-    return Response.json(formatZodError(parsed.error), { status: 400 });
-  }
-
-  const { codigo, tipo, nome, comodo } = parsed.data;
-  const now = new Date();
-
-  // Check if there is an existing pre-registered or active device with this pairing code
-  const [existingWithCode] = await db
-    .select()
-    .from(dispositivos)
-    .where(eq(dispositivos.codigoPareamento, codigo));
-
-  if (existingWithCode) {
-    // Check if expired (> 10 minutes)
-    if (
-      existingWithCode.codigoPareamentoExpiraEm &&
-      existingWithCode.codigoPareamentoExpiraEm < now
-    ) {
-      return Response.json(
-        formatErrorResponse(
-          "PAIRING_CODE_EXPIRED",
-          "Código expirado ou já usado. Gere um novo código no dispositivo."
-        ),
-        { status: 409 }
-      );
-    }
-
-    // Pair this device
-    const [updated] = await db
-      .update(dispositivos)
-      .set({
-        residenciaId,
-        nome,
-        comodo,
-        tipo,
-        codigoPareamento: null,
-        codigoPareamentoExpiraEm: null,
-      })
-      .where(eq(dispositivos.id, existingWithCode.id))
-      .returning();
-
-    if (!updated) {
-      return Response.json(
-        formatErrorResponse("INTERNAL_ERROR", "Falha ao atualizar dispositivo."),
-        { status: 500 }
-      );
-    }
-
-    return Response.json(
-      {
-        id: updated.id,
-        tipo: updated.tipo,
-        nome: updated.nome,
-        comodo: updated.comodo,
-        estadoAtual: updated.estadoAtual,
-        status: updated.status,
-        ultimoContatoEm: updated.ultimoContatoEm?.toISOString() ?? null,
-      },
-      { status: 201 }
-    );
-  }
-
-  // Create new paired device with generated deviceKey
-  const deviceKey = `dev_${crypto.randomUUID()}`;
-  const [created] = await db
-    .insert(dispositivos)
-    .values({
-      residenciaId,
-      tipo,
-      nome,
-      comodo,
-      deviceKey,
-      status: "offline",
-      estadoAtual: {},
-      ultimoContatoEm: null,
-    })
-    .returning();
-
-  if (!created) {
-    return Response.json(
-      formatErrorResponse("INTERNAL_ERROR", "Falha ao criar dispositivo."),
-      { status: 500 }
-    );
-  }
-
-  return Response.json(
-    {
-      id: created.id,
-      tipo: created.tipo,
-      nome: created.nome,
-      comodo: created.comodo,
-      estadoAtual: created.estadoAtual,
-      status: created.status,
-      ultimoContatoEm: null,
-    },
-    { status: 201 }
-  );
-}
-
-export async function handleListDispositivos(residenciaId: string): Promise<Response> {
-  const list = await db
-    .select()
-    .from(dispositivos)
-    .where(eq(dispositivos.residenciaId, residenciaId));
-
-  const mapped = list.map((d) => ({
+export function dispositivoJson(d: Dispositivo) {
+  return {
     id: d.id,
     tipo: d.tipo,
     nome: d.nome,
     comodo: d.comodo,
     estadoAtual: d.estadoAtual,
     status: d.status,
-    ultimoContatoEm: d.ultimoContatoEm?.toISOString() ?? null,
-  }));
-
-  return Response.json(mapped);
+    ultimoContatoEm: iso(d.ultimoContatoEm),
+  };
 }
 
-export async function handlePostComando(
-  req: Request,
-  dispositivoId: string
-): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return Response.json(
-      formatErrorResponse("INVALID_JSON", "O corpo da requisição deve ser um JSON válido."),
-      { status: 400 }
-    );
+const brokerFora = () =>
+  new HttpError(503, "BROKER_UNAVAILABLE", "Não foi possível falar com os dispositivos agora. Tente de novo.");
+
+const codigoInvalido = () =>
+  new HttpError(409, "PAIRING_CODE_INVALID", "Código expirado ou já usado. Gere um novo código no dispositivo.");
+
+/** RF-07 · pareia com o código que o firmware anunciou pelo MQTT (SPEC 6.3). */
+export async function handlePostPareamento(ctx: Contexto): Promise<Response> {
+  const residenciaId = idDoPath(ctx.params[0], "Residência");
+  await exigirCuidadorMembro(ctx.sessao, residenciaId);
+  const body = await lerCorpo(ctx.req, postPareamentoSchema);
+  if (!mqttPronto()) throw brokerFora();
+
+  const agora = new Date();
+  const [p] = await db
+    .select()
+    .from(pareamentos)
+    .where(and(eq(pareamentos.codigo, body.codigo), isNull(pareamentos.usadoEm), gt(pareamentos.expiraEm, agora)))
+    .orderBy(desc(pareamentos.createdAt))
+    .limit(1);
+  if (!p || p.conflito) throw codigoInvalido();
+  if (p.tipo !== body.tipo) {
+    throw new HttpError(400, "VALIDATION_ERROR", "Corrija os campos destacados.", {
+      tipo: `Este dispositivo se apresentou como ${p.tipo.replace("_", " ")}.`,
+    });
   }
 
-  const parsed = postComandoSchema.safeParse(body);
-  if (!parsed.success) {
-    return Response.json(formatZodError(parsed.error), { status: 400 });
-  }
+  const deviceKey = randomBytes(24).toString("hex");
+  const criado = await db.transaction(async (tx) => {
+    // marca o código como usado primeiro: duas requisições simultâneas não pareiam duas vezes
+    const [marcado] = await tx
+      .update(pareamentos)
+      .set({ usadoEm: agora })
+      .where(and(eq(pareamentos.id, p.id), isNull(pareamentos.usadoEm)))
+      .returning();
+    if (!marcado) throw codigoInvalido();
+    const [d] = await tx
+      .insert(dispositivos)
+      .values({
+        residenciaId,
+        tipo: body.tipo,
+        nome: body.nome,
+        comodo: body.comodo,
+        deviceKey,
+        status: "offline",
+        estadoAtual: {},
+      })
+      .returning();
+    if (!d) throw new Error("falha ao criar dispositivo");
+    await tx.update(pareamentos).set({ dispositivoId: d.id }).where(eq(pareamentos.id, p.id));
+    try {
+      await sincronizarCredencialDispositivo(d); // usuário MQTT no broker antes de confirmar
+    } catch {
+      throw brokerFora(); // desfaz tudo: código continua válido para tentar de novo
+    }
+    return d;
+  });
 
-  const [disp] = await db
+  const enviado = await publicarCredenciais(body.codigo, p.chave, {
+    residenciaId,
+    dispositivoId: criado.id,
+    deviceKey,
+  });
+  if (!enviado) console.error(`[pareamento] credencial de ${criado.id} não publicada; o firmware vai reanunciar.`);
+  return Response.json(dispositivoJson(criado), { status: 201 });
+}
+
+/** RF-09 · painel: cuidador membro ou morador da casa. */
+export async function handleListDispositivos(ctx: Contexto): Promise<Response> {
+  const residenciaId = idDoPath(ctx.params[0], "Residência");
+  await exigirAcessoResidencia(ctx.sessao, residenciaId);
+  const lista = await db
     .select()
     .from(dispositivos)
-    .where(eq(dispositivos.id, dispositivoId));
+    .where(eq(dispositivos.residenciaId, residenciaId))
+    .orderBy(dispositivos.comodo, dispositivos.nome);
+  return Response.json(lista.map(dispositivoJson));
+}
 
-  if (!disp) {
-    return Response.json(
-      formatErrorResponse("NOT_FOUND", "Dispositivo não encontrado."),
-      { status: 404 }
-    );
+/** RF-10 · 202 = publicado. Sucesso para a pessoa só quando o estado confirmado chega. */
+export async function handlePostComando(ctx: Contexto): Promise<Response> {
+  const dispositivoId = idDoPath(ctx.params[0], "Dispositivo");
+  const disp = await carregarDispositivo(dispositivoId);
+  await exigirAcessoResidencia(ctx.sessao, disp.residenciaId);
+  const { acao } = await lerCorpo(ctx.req, postComandoSchema);
+
+  if (disp.tipo !== "atuador_tomada") {
+    throw new HttpError(400, "DEVICE_NOT_ACTUATOR", "Este dispositivo não aceita comandos.");
   }
-
-  // RF-10: "comando para dispositivo offline é recusado antes de sair do app"
   if (disp.status === "offline") {
-    return Response.json(
-      formatErrorResponse(
-        "DEVICE_OFFLINE",
-        "Dispositivo offline, comando recusado antes de enviar."
-      ),
-      { status: 409 }
-    );
+    throw new HttpError(409, "DEVICE_OFFLINE", "Dispositivo offline, comando recusado antes de enviar.");
   }
-
-  // Publish to MQTT topic
-  await sendCommandToDevice(disp.residenciaId, disp.id, parsed.data.acao);
-
+  if (!(await sendCommandToDevice(disp.residenciaId, disp.id, acao))) throw brokerFora();
   return new Response(null, { status: 202 });
 }
 
-export async function handleListEventosDispositivo(
-  dispositivoId: string
-): Promise<Response> {
-  const seteDiasAtras = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+/** RF-18 · últimos 7 dias, sem heartbeat (heartbeat nem é gravado como evento). */
+export async function handleListEventosDispositivo(ctx: Contexto): Promise<Response> {
+  const dispositivoId = idDoPath(ctx.params[0], "Dispositivo");
+  const disp = await carregarDispositivo(dispositivoId);
+  await exigirCuidadorMembro(ctx.sessao, disp.residenciaId);
 
+  const seteDiasAtras = new Date(Date.now() - 7 * 24 * 3600_000);
   const eventos = await db
     .select()
     .from(eventosDispositivo)
     .where(
       and(
         eq(eventosDispositivo.dispositivoId, dispositivoId),
-        gt(eventosDispositivo.createdAt, seteDiasAtras)
+        gt(eventosDispositivo.createdAt, seteDiasAtras),
+        ne(eventosDispositivo.tipo, "heartbeat")
       )
     )
     .orderBy(desc(eventosDispositivo.createdAt))
-    .limit(100);
+    .limit(200);
 
-  const mapped = eventos.map((e) => ({
-    id: e.id,
-    tipo: e.tipo,
-    valor: e.valor,
-    createdAt: e.createdAt.toISOString(),
-  }));
-
-  return Response.json(mapped);
+  return Response.json(
+    eventos.map((e) => ({ id: e.id, tipo: e.tipo, valor: e.valor, createdAt: iso(e.createdAt) }))
+  );
 }

@@ -11,15 +11,27 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cuidalar"]
+      interval: 5s
+      retries: 10
 
   mosquitto:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2.0.20
     container_name: cuidalar-mosquitto
     restart: unless-stopped
+    # Precisa bater com MQTT_USERNAME / MQTT_PASSWORD de api/.env
+    environment:
+      MQTT_ADMIN_USER: ${MQTT_ADMIN_USER:-cuidalar-api}
+      MQTT_ADMIN_PASSWORD: ${MQTT_ADMIN_PASSWORD:-cuidalar-dev}
+    entrypoint: ["/bin/sh", "/docker-entrypoint-cuidalar.sh"]
     ports:
       - "1883:1883"
+      - "8883:8883"
     volumes:
-      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/docker-entrypoint.sh:/docker-entrypoint-cuidalar.sh:ro
+      - ./mosquitto/certs:/mosquitto/certs:ro
       - mosquitto_data:/mosquitto/data
       - mosquitto_log:/mosquitto/log
 

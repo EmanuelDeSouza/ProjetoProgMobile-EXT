@@ -1,4 +1,5 @@
-import { eq } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
+import { and, eq } from "drizzle-orm";
 import { db } from "../src/db";
 import { hashPassword, hashPin } from "../src/auth";
 import {
@@ -58,7 +59,7 @@ export async function runSeed() {
   const [membership] = await db
     .select()
     .from(residenciaMembros)
-    .where(eq(residenciaMembros.residenciaId, residencia.id));
+    .where(and(eq(residenciaMembros.residenciaId, residencia.id), eq(residenciaMembros.usuarioId, user.id)));
 
   if (!membership) {
     await db.insert(residenciaMembros).values({
@@ -124,17 +125,16 @@ export async function runSeed() {
     },
   ];
 
-  const now = new Date();
   const createdDisps = [];
 
   for (const d of demoDispositivos) {
     let [disp] = await db
       .select()
       .from(dispositivos)
-      .where(eq(dispositivos.nome, d.nome));
+      .where(and(eq(dispositivos.nome, d.nome), eq(dispositivos.residenciaId, residencia.id)));
 
     if (!disp) {
-      const deviceKey = `dev_${crypto.randomUUID()}`;
+      const deviceKey = randomBytes(24).toString("hex");
       [disp] = await db
         .insert(dispositivos)
         .values({
@@ -143,9 +143,10 @@ export async function runSeed() {
           nome: d.nome,
           comodo: d.comodo,
           deviceKey,
-          status: "online",
+          // Sem simulador rodando, o painel mostra a verdade: offline (RF-08).
+          status: "offline",
           estadoAtual: d.estadoAtual,
-          ultimoContatoEm: now,
+          ultimoContatoEm: null,
         })
         .returning();
       console.log(`✓ Dispositivo criado: ${disp?.nome} (${disp?.tipo})`);
@@ -196,7 +197,9 @@ export async function runSeed() {
 
   console.log("\nSeed concluído com sucesso!");
   console.log("Credenciais Cuidador: email: cuidador@cuidalar.app | senha: cuidador123");
-  console.log(`Credenciais Morador: PIN: 1234 | Morador ID: ${morador.id}`);
+  console.log(`Morador: Dona Elza | PIN: 1234 (no app: "Usar este aparelho para Dona Elza")`);
+  console.log("Dispositivos começam offline. Para dar vida a eles: bun run iot:simulate");
+  console.log("(a API precisa estar rodando antes, para criar as credenciais MQTT no broker)");
 }
 
 if (import.meta.main) {

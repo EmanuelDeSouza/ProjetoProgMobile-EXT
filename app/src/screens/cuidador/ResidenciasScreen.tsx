@@ -10,17 +10,19 @@ import {
 } from "react-native";
 import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useResidence } from "../../context/ResidenceContext";
-import { apiRepository } from "../../services/api";
+import { apiRepository, mensagemDeErro } from "../../services/api";
+import { useAuth } from "../../context/AuthContext";
+import { formResidencia, primeiroErro } from "../../services/schemas";
 import { type ResidenciaComPapel } from "../../types";
 
 interface ResidenciasScreenProps {
-  onSelectResidencia: (residencia: ResidenciaComPapel) => void;
+  onSelectResidencia: (r: ResidenciaComPapel) => void;
+  onAbrirNotificacoes: () => void;
 }
 
-export const ResidenciasScreen: React.FC<ResidenciasScreenProps> = ({
-  onSelectResidencia,
-}) => {
-  const { residencias, loading, loadResidencias, selectResidencia } = useResidence();
+export const ResidenciasScreen: React.FC<ResidenciasScreenProps> = ({ onSelectResidencia, onAbrirNotificacoes }) => {
+  const { residencias, loading, erro, loadResidencias, selectResidencia } = useResidence();
+  const { logout, user } = useAuth();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [nome, setNome] = useState("");
   const [enderecoCurto, setEnderecoCurto] = useState("");
@@ -28,20 +30,26 @@ export const ResidenciasScreen: React.FC<ResidenciasScreenProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   const handleCreate = async () => {
-    if (!nome) {
-      setError("O nome da residência é obrigatório.");
+    const parsed = formResidencia.safeParse({ nome, enderecoCurto });
+    if (!parsed.success) {
+      setError(primeiroErro(parsed.error));
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      await apiRepository.postResidencia({ nome, enderecoCurto });
+      const criada = await apiRepository.postResidencia({
+        nome: parsed.data.nome,
+        enderecoCurto: parsed.data.enderecoCurto || undefined,
+      });
       await loadResidencias();
+      selectResidencia({ ...criada, papel: "dono" });
+      onSelectResidencia({ ...criada, papel: "dono" });
       setNome("");
       setEnderecoCurto("");
       setShowCreateModal(false);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Erro ao criar residência.");
+      setError(mensagemDeErro(err, "Erro ao criar residência."));
     } finally {
       setSaving(false);
     }
@@ -50,12 +58,24 @@ export const ResidenciasScreen: React.FC<ResidenciasScreenProps> = ({
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Minhas Residências</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle}>Minhas residências</Text>
+          {user && <Text style={styles.resEnd}>{user.nome}</Text>}
+        </View>
         <TouchableOpacity
           style={styles.btnNova}
           onPress={() => setShowCreateModal(true)}
         >
           <Text style={styles.btnNovaText}>+ Nova</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.modalButtonsRow}>
+        <TouchableOpacity style={styles.buttonSecondary} onPress={onAbrirNotificacoes} accessibilityRole="button">
+          <Text style={styles.buttonSecondaryText}>🔔 Convites e avisos</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.buttonSecondary} onPress={() => void logout()} accessibilityRole="button">
+          <Text style={styles.buttonSecondaryText}>Sair</Text>
         </TouchableOpacity>
       </View>
 
@@ -104,7 +124,9 @@ export const ResidenciasScreen: React.FC<ResidenciasScreenProps> = ({
       ) : residencias.length === 0 ? (
         <View style={styles.emptyBox}>
           <Text style={styles.emptyTitle}>Nenhuma residência encontrada.</Text>
-          <Text style={styles.emptyDesc}>Toque em "+ Nova" para cadastrar sua primeira residência.</Text>
+          <Text style={styles.emptyDesc}>
+            {erro ?? "Toque em \"+ Nova\" para cadastrar a casa que você acompanha. Se alguém te convidou, veja em \"Convites e avisos\"."}
+          </Text>
         </View>
       ) : (
         <FlatList
@@ -118,6 +140,7 @@ export const ResidenciasScreen: React.FC<ResidenciasScreenProps> = ({
                 selectResidencia(item);
                 onSelectResidencia(item);
               }}
+              accessibilityRole="button"
             >
               <View>
                 <Text style={styles.resName}>{item.nome}</Text>

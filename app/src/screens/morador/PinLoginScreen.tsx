@@ -1,14 +1,8 @@
 import React, { useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  ActivityIndicator,
-} from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from "react-native";
 import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useAuth } from "../../context/AuthContext";
+import { ApiException, mensagemDeErro } from "../../services/api";
 
 interface PinLoginScreenProps {
   onSwitchToCuidador: () => void;
@@ -17,8 +11,7 @@ interface PinLoginScreenProps {
 export const PinLoginScreen: React.FC<PinLoginScreenProps> = ({
   onSwitchToCuidador,
 }) => {
-  const { loginMorador } = useAuth();
-  const [moradorId, setMoradorId] = useState("");
+  const { loginMorador, aparelhoMorador } = useAuth();
   const [pin, setPin] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -36,10 +29,6 @@ export const PinLoginScreen: React.FC<PinLoginScreenProps> = ({
   };
 
   const handleEntrar = async () => {
-    if (!moradorId.trim()) {
-      setErrorMessage("Informe o identificador do morador.");
-      return;
-    }
     if (pin.length !== 4) {
       setErrorMessage("Digite os 4 números do seu PIN.");
       return;
@@ -48,9 +37,15 @@ export const PinLoginScreen: React.FC<PinLoginScreenProps> = ({
     setLoading(true);
     setErrorMessage(null);
     try {
-      await loginMorador(moradorId.trim(), pin);
+      await loginMorador(pin);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "PIN incorreto. Tente de novo.";
+      // SPEC seção 3: mensagem simples, sem contagem de tentativas visível
+      const msg =
+        err instanceof ApiException && err.status === 401
+          ? "PIN incorreto. Tente de novo."
+          : err instanceof ApiException && err.status === 429
+            ? "Muitas tentativas. Espere alguns minutos e tente de novo."
+            : mensagemDeErro(err);
       setErrorMessage(msg);
       setPin("");
     } finally {
@@ -60,19 +55,8 @@ export const PinLoginScreen: React.FC<PinLoginScreenProps> = ({
 
   return (
     <View style={styles.container}>
-      <Text style={styles.titulo}>Olá! Digite seu PIN</Text>
-      <Text style={styles.instrucao}>
-        Use o teclado numérico para acessar sua casa
-      </Text>
-
-      {/* ID do Morador (geralmente fixado ou configurado uma vez no aparelho da casa) */}
-      <TextInput
-        style={styles.moradorIdInput}
-        placeholder="Identificador do Morador (UUID)"
-        placeholderTextColor={colors.faint}
-        value={moradorId}
-        onChangeText={setMoradorId}
-      />
+      <Text style={styles.titulo}>Olá, {aparelhoMorador?.nome ?? "bem-vindo(a)"}!</Text>
+      <Text style={styles.instrucao}>Digite seu PIN de 4 números</Text>
 
       {/* Visor do PIN */}
       <View style={styles.pinDisplay}>
@@ -147,7 +131,7 @@ export const PinLoginScreen: React.FC<PinLoginScreenProps> = ({
         onPress={onSwitchToCuidador}
       >
         <Text style={styles.btnVoltarCuidadorText}>
-          Acesso do Cuidador (E-mail e Senha)
+          Sou cuidador (e-mail e senha)
         </Text>
       </TouchableOpacity>
     </View>
@@ -173,20 +157,6 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginTop: spacing.xxs,
     marginBottom: spacing.md,
-  },
-  moradorIdInput: {
-    ...typography.bodyLg,
-    height: 52, // DESIGN.md: text-input height 52px
-    width: "100%",
-    maxWidth: 320,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: rounded.sm,
-    paddingHorizontal: spacing.sm,
-    backgroundColor: colors.paper,
-    color: colors.ink,
-    marginBottom: spacing.md,
-    textAlign: "center",
   },
   pinDisplay: {
     flexDirection: "row",

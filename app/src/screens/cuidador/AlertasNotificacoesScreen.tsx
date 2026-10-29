@@ -1,450 +1,476 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   View,
   Text,
   TextInput,
   TouchableOpacity,
-  FlatList,
+  ScrollView,
   StyleSheet,
   ActivityIndicator,
+  RefreshControl,
 } from "react-native";
 import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useResidence } from "../../context/ResidenceContext";
-import { apiRepository } from "../../services/api";
-import { type Alerta, type Notificacao } from "../../types";
+import { apiRepository, mensagemDeErro } from "../../services/api";
+import { ouvirChegada } from "../../services/notifications";
+import type { Alerta, CondicaoRegra, Dispositivo, Notificacao, SOSEvento } from "../../types";
 
-interface AlertasNotificacoesScreenProps {
+interface Props {
+  abaInicial?: "seguranca" | "notificacoes";
   onBack: () => void;
 }
 
-export const AlertasNotificacoesScreen: React.FC<AlertasNotificacoesScreenProps> = ({
-  onBack,
-}) => {
-  const { selectedResidencia } = useResidence();
-  const [alertas, setAlertas] = useState<Alerta[]>([]);
-  const [notificacoes, setNotificacoes] = useState<Notificacao[]>([]);
-  const [aba, setAba] = useState<"alertas" | "notificacoes">("alertas");
-  const [loading, setLoading] = useState(false);
-  const [reconhecendoId, setReconhecendoId] = useState<string | null>(null);
-  const [nota, setNota] = useState("");
+const DESCRICAO_CONDICAO: Record<CondicaoRegra, string> = {
+  sem_movimento_por: "Sem movimento por tempo demais",
+  contato_aberto_apos_horario: "Porta ou janela aberta fora do horário",
+  temperatura_fora_da_faixa: "Temperatura fora da faixa segura",
+  dispositivo_offline: "Dispositivo sem contato",
+};
 
-  const loadData = async () => {
-    if (!selectedResidencia) return;
-    setLoading(true);
+const hora = (iso: string) =>
+  new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+function tituloAlerta(a: Alerta): string {
+  if (!a.condicao) return "Dispositivo importante sem contato";
+  return DESCRICAO_CONDICAO[a.condicao];
+}
+
+function nomeDispositivo(id: string | null | undefined, lista: Dispositivo[]): string | null {
+  const d = lista.find((x) => x.id === id);
+  return d ? `${d.nome} · ${d.comodo}` : null;
+}
+
+/** RF-14, RF-15, RF-17 · SOS sempre no topo, alertas, notificações e convites. */
+export const AlertasNotificacoesScreen: React.FC<Props> = ({ abaInicial = "seguranca", onBack }) => {
+  const { selectedResidencia, dispositivos, loadResidencias } = useResidence();
+  const temCasa = Boolean(selectedResidencia);
+  const [aba, setAba] = useState<"seguranca" | "notificacoes">(temCasa ? abaInicial : "notificacoes");
+  const [alertas, setAlertas] = useState<Alerta[]>([]);
+  const [sos, setSos] = useState<SOSEvento[]>([]);
+  const [notificacoes, setNotificacoes] = useState<Notificacao[]>([]);
+  const [fimNotificacoes, setFimNotificacoes] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [offline, setOffline] = useState(false);
+  const [erro, setErro] = useState<string | null>(null);
+  const [escalandoId, setEscalandoId] = useState<string | null>(null);
+  const [nota, setNota] = useState("");
+  const [ocupadoId, setOcupadoId] = useState<string | null>(null);
+
+  const carregar = useCallback(async () => {
+    setErro(null);
     try {
-      const [listaAlertas, listaNotifs] = await Promise.all([
-        apiRepository.listAlertas(selectedResidencia.id),
-        apiRepository.listNotificacoes(),
-      ]);
-      setAlertas(listaAlertas);
-      setNotificacoes(listaNotifs);
-    } catch {
-      // offline fallback
+      const tarefas: Array<Promise<void>> = [
+        apiRepository.listNotificacoes({ limite: 30 }).then((n) => {
+          setNotificacoes(n);
+          setFimNotificacoes(n.length < 30);
+        }),
+      ];
+      if (selectedResidencia) {
+        tarefas.push(
+          apiRepository.listAlertas(selectedResidencia.id).then((r) => {
+            setAlertas(r.dados);
+            setOffline((o) => o || r.offline);
+          }),
+          apiRepository.listSOS(selectedResidencia.id).then((r) => {
+            setSos(r.dados);
+            setOffline((o) => o || r.offline);
+          })
+        );
+      }
+      setOffline(false);
+      await Promise.all(tarefas);
+    } catch (e) {
+      setErro(mensagemDeErro(e, "Não foi possível carregar. Tente de novo."));
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedResidencia]);
 
   useEffect(() => {
-    loadData();
-  }, [selectedResidencia?.id]);
+    void carregar();
+    const parar = ouvirChegada(() => void carregar());
+    const t = setInterval(() => void carregar(), 20_000);
+    return () => {
+      parar();
+      clearInterval(t);
+    };
+  }, [carregar]);
 
-  const handleReconhecer = async (alertaId: string, resolucaoPadrao?: string) => {
+  const maisNotificacoes = async () => {
+    const ultima = notificacoes[notificacoes.length - 1];
+    if (!ultima) return;
     try {
-      await apiRepository.patchAlerta(alertaId, {
-        status: "reconhecido",
-        nota: resolucaoPadrao || nota || "Verificado pelo cuidador.",
-      });
-      setReconhecendoId(null);
+      const mais = await apiRepository.listNotificacoes({ limite: 30, antes: ultima.createdAt });
+      setNotificacoes((n) => [...n, ...mais]);
+      setFimNotificacoes(mais.length < 30);
+    } catch (e) {
+      setErro(mensagemDeErro(e));
+    }
+  };
+
+  const executar = async (id: string, fn: () => Promise<unknown>) => {
+    setOcupadoId(id);
+    setErro(null);
+    try {
+      await fn();
+      await carregar();
+    } catch (e) {
+      setErro(mensagemDeErro(e));
+    } finally {
+      setOcupadoId(null);
+    }
+  };
+
+  const reconhecerAlerta = (a: Alerta) =>
+    executar(a.id, () => apiRepository.patchAlerta(a.id, { status: "reconhecido", nota: "Verifiquei, está tudo bem." }));
+
+  const escalarAlerta = (a: Alerta) => {
+    if (!nota.trim()) {
+      setErro("Escreva o que está acontecendo para os outros cuidadores.");
+      return;
+    }
+    void executar(a.id, async () => {
+      await apiRepository.patchAlerta(a.id, { status: "aberto", nota: nota.trim() });
+      setEscalandoId(null);
       setNota("");
-      await loadData();
-    } catch (err) {
-      console.error("Erro ao reconhecer alerta:", err);
-    }
+    });
   };
 
-  const handleMarcarLida = async (notificacaoId: string) => {
-    try {
-      await apiRepository.patchNotificacao(notificacaoId, true);
-      await loadData();
-    } catch (err) {
-      console.error("Erro ao marcar notificação:", err);
+  const abrirNotificacao = async (n: Notificacao) => {
+    if (!n.lidaEm) {
+      setNotificacoes((l) => l.map((x) => (x.id === n.id ? { ...x, lidaEm: new Date().toISOString() } : x)));
+      apiRepository.patchNotificacao(n.id, true).catch(() => {});
     }
+    if (n.tipo !== "convite" && temCasa) setAba("seguranca");
   };
+
+  const aceitarConvite = (n: Notificacao) =>
+    executar(n.id, async () => {
+      await apiRepository.patchConvite(n.alvoId);
+      await loadResidencias();
+    });
+
+  const sosAbertos = sos.filter((x) => x.status === "aberto");
+  const sosRecentes = sos.filter((x) => x.status !== "aberto").slice(0, 5);
+  const alertasAbertos = alertas.filter((a) => a.status === "aberto");
+  const alertasResolvidos = alertas.filter((a) => a.status === "reconhecido").slice(0, 10);
+  const naoLidas = notificacoes.filter((n) => !n.lidaEm).length;
+
+  const cardSOS = (s: SOSEvento) => {
+    const aberto = s.status === "aberto";
+    const origem =
+      s.origem === "botao_fisico"
+        ? `Botão de emergência${nomeDispositivo(s.dispositivoId, dispositivos) ? ` (${nomeDispositivo(s.dispositivoId, dispositivos)})` : ""}`
+        : "Pelo aplicativo do morador";
+    return (
+      <View key={s.id} style={[styles.card, aberto ? styles.cardSos : styles.cardResolvido]}>
+        <Text style={[styles.cardTitulo, aberto && { color: colors.sos }]}>
+          {aberto ? "🚨 SOS — pedido de ajuda" : s.status === "cancelado_pelo_morador" ? "SOS cancelado: foi sem querer" : "SOS atendido"}
+        </Text>
+        <Text style={styles.cardTexto}>{origem}</Text>
+        <Text style={styles.cardMeta}>
+          {hora(s.createdAt)}
+          {s.reconhecidoPor ? ` · atendido por ${s.reconhecidoPor}` : ""}
+        </Text>
+        {aberto && (
+          <TouchableOpacity
+            style={styles.btnPrimario}
+            onPress={() => void executar(s.id, () => apiRepository.reconhecerSOS(s.id))}
+            disabled={ocupadoId === s.id}
+            accessibilityRole="button"
+          >
+            {ocupadoId === s.id ? (
+              <ActivityIndicator color={colors.onPrimary} />
+            ) : (
+              <Text style={styles.btnPrimarioText}>✓ Estou cuidando disso</Text>
+            )}
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  };
+
+  const cardAlerta = (a: Alerta) => {
+    const aberto = a.status === "aberto";
+    const onde = nomeDispositivo(a.dispositivoId, dispositivos);
+    return (
+      <View key={a.id} style={[styles.card, aberto ? styles.cardAlerta : styles.cardResolvido]}>
+        <View style={styles.cardTopo}>
+          <Text style={[styles.cardTitulo, aberto && { color: colors.warn }, { flex: 1 }]}>
+            {aberto ? "⚠️ " : "✓ "}
+            {tituloAlerta(a)}
+          </Text>
+          {a.severidade === "alta" && aberto && (
+            <View style={styles.chipAlta}>
+              <Text style={styles.chipAltaText}>Importante</Text>
+            </View>
+          )}
+        </View>
+        {onde && <Text style={styles.cardTexto}>{onde}</Text>}
+        {a.nota && <Text style={styles.nota}>Nota: {a.nota}</Text>}
+        <Text style={styles.cardMeta}>
+          {hora(a.createdAt)}
+          {a.reconhecidoPor ? ` · verificado por ${a.reconhecidoPor}` : ""}
+        </Text>
+
+        {aberto &&
+          (escalandoId === a.id ? (
+            <View>
+              <TextInput
+                style={styles.input}
+                placeholder="O que está acontecendo? (os outros cuidadores verão)"
+                placeholderTextColor={colors.faint}
+                value={nota}
+                onChangeText={setNota}
+                multiline
+              />
+              <View style={styles.linha}>
+                <TouchableOpacity style={styles.btnSecundario} onPress={() => setEscalandoId(null)}>
+                  <Text style={styles.btnSecundarioText}>Cancelar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.btnPrimario, { flex: 1, marginTop: 0 }]} onPress={() => escalarAlerta(a)}>
+                  <Text style={styles.btnPrimarioText}>Avisar os outros</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <View style={styles.linha}>
+              <TouchableOpacity
+                style={[styles.btnPrimario, { flex: 1, marginTop: 0 }]}
+                onPress={() => void reconhecerAlerta(a)}
+                disabled={ocupadoId === a.id}
+                accessibilityRole="button"
+              >
+                {ocupadoId === a.id ? (
+                  <ActivityIndicator color={colors.onPrimary} />
+                ) : (
+                  <Text style={styles.btnPrimarioText}>Verifiquei, está tudo bem</Text>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.btnSecundario}
+                onPress={() => {
+                  setEscalandoId(a.id);
+                  setNota(a.nota ?? "");
+                }}
+                accessibilityRole="button"
+              >
+                <Text style={styles.btnSecundarioText}>Preciso de ajuda</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+      </View>
+    );
+  };
+
+  const cardNotificacao = (n: Notificacao) => (
+    <TouchableOpacity
+      key={n.id}
+      style={[styles.card, !n.lidaEm ? styles.cardNaoLida : styles.cardResolvido]}
+      onPress={() => void abrirNotificacao(n)}
+      accessibilityRole="button"
+      accessibilityHint={n.lidaEm ? undefined : "Marca como lida"}
+    >
+      <Text style={[styles.cardTitulo, n.tipo === "sos" && { color: colors.sos }]}>{n.titulo}</Text>
+      <Text style={styles.cardTexto}>{n.mensagem}</Text>
+      <Text style={styles.cardMeta}>
+        {hora(n.createdAt)}
+        {!n.lidaEm ? " · nova" : ""}
+      </Text>
+      {n.tipo === "convite" && !n.lidaEm && (
+        <TouchableOpacity
+          style={styles.btnPrimario}
+          onPress={() => void aceitarConvite(n)}
+          disabled={ocupadoId === n.id}
+          accessibilityRole="button"
+        >
+          {ocupadoId === n.id ? (
+            <ActivityIndicator color={colors.onPrimary} />
+          ) : (
+            <Text style={styles.btnPrimarioText}>Aceitar convite</Text>
+          )}
+        </TouchableOpacity>
+      )}
+    </TouchableOpacity>
+  );
 
   return (
     <View style={styles.container}>
-      <TouchableOpacity style={styles.btnVoltar} onPress={onBack}>
-        <Text style={styles.btnVoltarText}>← Voltar ao painel</Text>
-      </TouchableOpacity>
-
-      <Text style={styles.title}>Central de Segurança</Text>
-
-      {/* Abas */}
-      <View style={styles.tabRow}>
-        <TouchableOpacity
-          style={[styles.tab, aba === "alertas" && styles.tabActive]}
-          onPress={() => setAba("alertas")}
-        >
-          <Text style={[styles.tabText, aba === "alertas" && styles.tabTextActive]}>
-            Alertas Ativos
-          </Text>
+      <View style={styles.topBar}>
+        <TouchableOpacity style={styles.btnVoltar} onPress={onBack} accessibilityRole="button">
+          <Text style={styles.btnVoltarText}>← Voltar</Text>
         </TouchableOpacity>
+        <Text style={styles.title}>Central de segurança</Text>
+      </View>
+
+      <View style={styles.tabRow}>
+        {temCasa && (
+          <TouchableOpacity
+            style={[styles.tab, aba === "seguranca" && styles.tabActive]}
+            onPress={() => setAba("seguranca")}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: aba === "seguranca" }}
+          >
+            <Text style={[styles.tabText, aba === "seguranca" && styles.tabTextActive]}>
+              Alertas{sosAbertos.length + alertasAbertos.length ? ` (${sosAbertos.length + alertasAbertos.length})` : ""}
+            </Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={[styles.tab, aba === "notificacoes" && styles.tabActive]}
           onPress={() => setAba("notificacoes")}
+          accessibilityRole="tab"
+          accessibilityState={{ selected: aba === "notificacoes" }}
         >
-          <Text
-            style={[styles.tabText, aba === "notificacoes" && styles.tabTextActive]}
-          >
-            Notificações ({notificacoes.filter((n) => !n.lidaEm).length})
+          <Text style={[styles.tabText, aba === "notificacoes" && styles.tabTextActive]}>
+            Notificações{naoLidas ? ` (${naoLidas})` : ""}
           </Text>
         </TouchableOpacity>
       </View>
 
-      {loading ? (
-        <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 40 }} />
-      ) : aba === "alertas" ? (
-        alertas.length === 0 ? (
-          <View style={styles.emptyBox}>
-            <Text style={styles.emptyTitle}>Tudo em ordem!</Text>
-            <Text style={styles.emptyDesc}>Nenhum alerta pendente no momento.</Text>
+      {offline && (
+        <View style={styles.bannerOffline}>
+          <Text style={styles.bannerOfflineText}>Sem conexão. Mostrando o último estado salvo.</Text>
+        </View>
+      )}
+      {erro && (
+        <View style={styles.bannerErro}>
+          <Text style={styles.bannerErroText}>{erro}</Text>
+        </View>
+      )}
+
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={false} onRefresh={() => void carregar()} colors={[colors.primary]} />}
+      >
+        {loading ? (
+          <>
+            <View style={styles.skeleton} />
+            <View style={styles.skeleton} />
+            <View style={styles.skeleton} />
+          </>
+        ) : aba === "seguranca" ? (
+          <>
+            {/* DESIGN.md: SOS sempre no topo, nunca misturado com alertas comuns */}
+            {sosAbertos.map(cardSOS)}
+            {alertasAbertos.map(cardAlerta)}
+            {sosAbertos.length === 0 && alertasAbertos.length === 0 && (
+              <View style={styles.vazio}>
+                <Text style={styles.vazioTitulo}>Tudo em ordem.</Text>
+                <Text style={styles.vazioTexto}>Nenhum alerta aberto agora.</Text>
+              </View>
+            )}
+            {(sosRecentes.length > 0 || alertasResolvidos.length > 0) && <Text style={styles.secao}>Resolvidos recentemente</Text>}
+            {sosRecentes.map(cardSOS)}
+            {alertasResolvidos.map(cardAlerta)}
+          </>
+        ) : notificacoes.length === 0 ? (
+          <View style={styles.vazio}>
+            <Text style={styles.vazioTitulo}>Nenhuma notificação.</Text>
           </View>
         ) : (
-          <FlatList
-            data={alertas}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => {
-              const isAberto = item.status === "aberto";
-              const isHigh = item.severidade === "alta";
-
-              return (
-                <View
-                  style={[
-                    styles.cardAlerta,
-                    isHigh ? styles.cardAlertaHigh : styles.cardAlertaWarn,
-                  ]}
-                >
-                  <View style={styles.cardHeader}>
-                    <Text
-                      style={[
-                        styles.severidadeBadge,
-                        isHigh ? styles.severidadeHigh : styles.severidadeWarn,
-                      ]}
-                    >
-                      SEVERIDADE {item.severidade.toUpperCase()}
-                    </Text>
-                    <Text style={styles.alertaData}>
-                      {new Date(item.createdAt).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </Text>
-                  </View>
-
-                  <Text style={styles.alertaTitulo}>
-                    {isHigh ? "Alerta Crítico / Emergência" : "Atenção Necessária"}
-                  </Text>
-                  <Text style={styles.alertaDesc}>
-                    {isAberto
-                      ? "Este alerta aguarda reconhecimento de um cuidador."
-                      : "Alerta já verificado e reconhecido."}
-                  </Text>
-
-                  {isAberto && (
-                    <View style={styles.actionsContainer}>
-                      {reconhecendoId === item.id ? (
-                        <View style={styles.reconhecerForm}>
-                          <TextInput
-                            style={styles.inputNota}
-                            placeholder="Adicionar nota para outros cuidadores..."
-                            placeholderTextColor={colors.faint}
-                            value={nota}
-                            onChangeText={setNota}
-                          />
-                          <View style={styles.actionButtonsRow}>
-                            <TouchableOpacity
-                              style={styles.btnActionSecondary}
-                              onPress={() => setReconhecendoId(null)}
-                            >
-                              <Text style={styles.btnActionSecondaryText}>Cancelar</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              style={styles.btnActionPrimary}
-                              onPress={() => handleReconhecer(item.id)}
-                            >
-                              <Text style={styles.btnActionPrimaryText}>Salvar</Text>
-                            </TouchableOpacity>
-                          </View>
-                        </View>
-                      ) : (
-                        <View style={styles.actionButtonsRow}>
-                          <TouchableOpacity
-                            style={styles.btnTudoBem}
-                            onPress={() =>
-                              handleReconhecer(item.id, "Verifiquei, está tudo bem.")
-                            }
-                          >
-                            <Text style={styles.btnTudoBemText}>
-                              ✓ Verifiquei, está tudo bem
-                            </Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={styles.btnEscalar}
-                            onPress={() => setReconhecendoId(item.id)}
-                          >
-                            <Text style={styles.btnEscalarText}>Anotar / Escalar</Text>
-                          </TouchableOpacity>
-                        </View>
-                      )}
-                    </View>
-                  )}
-                </View>
-              );
-            }}
-          />
-        )
-      ) : (
-        <FlatList
-          data={notificacoes}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={[
-                styles.cardNotif,
-                !item.lidaEm && styles.cardNotifNaoLida,
-              ]}
-              onPress={() => handleMarcarLida(item.id)}
-            >
-              <View style={styles.cardHeader}>
-                <Text style={styles.notifTipo}>
-                  {item.tipo === "sos" ? "🚨 SOS EMERGÊNCIA" : "⚠️ ALERTA"}
-                </Text>
-                <Text style={styles.alertaData}>
-                  {new Date(item.createdAt).toLocaleDateString()}
-                </Text>
-              </View>
-              <Text style={styles.notifMensagem}>
-                {item.tipo === "sos"
-                  ? "Botão de emergência foi acionado no imóvel."
-                  : "Nova anomalia detectada pelas regras de monitoramento."}
-              </Text>
-              {!item.lidaEm && (
-                <Text style={styles.marcarLidaText}>Toque para marcar como lida</Text>
-              )}
-            </TouchableOpacity>
-          )}
-        />
-      )}
+          <>
+            {notificacoes.map(cardNotificacao)}
+            {!fimNotificacoes && (
+              <TouchableOpacity style={styles.btnSecundarioLargo} onPress={() => void maisNotificacoes()}>
+                <Text style={styles.btnSecundarioText}>Ver mais antigas</Text>
+              </TouchableOpacity>
+            )}
+          </>
+        )}
+      </ScrollView>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.paper,
-    padding: spacing.screenGutter,
-  },
-  btnVoltar: {
-    paddingVertical: spacing.xs,
-    marginBottom: spacing.xs,
-  },
-  btnVoltarText: {
-    ...typography.caption,
-    color: colors.primary,
-    fontWeight: "600",
-  },
-  title: {
-    ...typography.cuidadorScreenTitle,
-    color: colors.ink,
-    marginBottom: spacing.md,
-  },
-  tabRow: {
+  container: { flex: 1, backgroundColor: colors.paper },
+  topBar: {
+    minHeight: 56,
     flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: spacing.md,
     borderBottomWidth: 1,
     borderBottomColor: colors.line,
-    marginBottom: spacing.md,
+    gap: spacing.sm,
   },
+  btnVoltar: { minHeight: 48, justifyContent: "center", paddingRight: spacing.sm },
+  btnVoltarText: { ...typography.buttonMd, color: colors.primary },
+  title: { ...typography.cuidadorScreenTitle, color: colors.ink, flex: 1 },
+  tabRow: { flexDirection: "row", paddingHorizontal: spacing.md, gap: spacing.xs, paddingTop: spacing.sm },
   tab: {
     flex: 1,
-    paddingVertical: spacing.sm,
+    minHeight: 48,
     alignItems: "center",
     justifyContent: "center",
-    minHeight: 48, // DESIGN.md: alvo de toque >= 48px
-  },
-  tabActive: {
     borderBottomWidth: 2,
-    borderBottomColor: colors.primary,
+    borderBottomColor: "transparent",
   },
-  tabText: {
-    ...typography.buttonMd,
-    color: colors.muted,
-  },
-  tabTextActive: {
-    color: colors.primary,
-  },
-  cardAlerta: {
-    padding: spacing.md,
-    borderRadius: rounded.md,
-    marginBottom: spacing.md,
-  },
-  cardAlertaWarn: {
-    backgroundColor: colors.warnSoft,
-  },
-  cardAlertaHigh: {
-    backgroundColor: colors.sosSoft,
-  },
-  cardHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: spacing.xxs,
-  },
-  severidadeBadge: {
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  severidadeHigh: {
-    color: colors.sos,
-  },
-  severidadeWarn: {
-    color: colors.warn,
-  },
-  alertaData: {
-    ...typography.caption,
-    color: colors.muted,
-  },
-  alertaTitulo: {
-    ...typography.cuidadorHeadingCard,
-    color: colors.ink,
-    marginVertical: spacing.xxs,
-  },
-  alertaDesc: {
+  tabActive: { borderBottomColor: colors.primary },
+  tabText: { ...typography.buttonMd, color: colors.muted },
+  tabTextActive: { color: colors.primary },
+  bannerOffline: { backgroundColor: colors.offlineSoft, paddingVertical: spacing.sm, paddingHorizontal: spacing.md },
+  bannerOfflineText: { ...typography.bodyMd, color: colors.muted },
+  bannerErro: { backgroundColor: colors.dangerSoft, paddingVertical: spacing.sm, paddingHorizontal: spacing.md },
+  bannerErroText: { ...typography.bodyMd, color: colors.danger },
+  scroll: { padding: spacing.screenGutter, paddingBottom: spacing.xxl },
+  card: { borderRadius: rounded.md, padding: spacing.md, marginBottom: spacing.sm, borderWidth: 1, borderColor: colors.line },
+  cardSos: { backgroundColor: colors.sosSoft, borderColor: colors.sosSoft },
+  cardAlerta: { backgroundColor: colors.warnSoft, borderColor: colors.warnSoft },
+  cardResolvido: { backgroundColor: colors.paper },
+  cardNaoLida: { backgroundColor: colors.primarySoft, borderColor: colors.primarySoft },
+  cardTopo: { flexDirection: "row", alignItems: "center", gap: spacing.xs },
+  cardTitulo: { ...typography.cuidadorHeadingCard, color: colors.ink },
+  cardTexto: { ...typography.bodyMd, color: colors.ink, marginTop: spacing.xxs },
+  cardMeta: { ...typography.caption, color: colors.faint, marginTop: spacing.xxs },
+  nota: { ...typography.bodyMd, color: colors.muted, marginTop: spacing.xs, fontStyle: "italic" },
+  chipAlta: { backgroundColor: colors.warn, borderRadius: rounded.sm, paddingHorizontal: spacing.xs, paddingVertical: 2 },
+  chipAltaText: { ...typography.caption, color: colors.onPrimary, fontWeight: "700" },
+  linha: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.sm },
+  input: {
     ...typography.bodyMd,
-    color: colors.muted,
-    marginBottom: spacing.sm,
-  },
-  actionsContainer: {
-    marginTop: spacing.xs,
-  },
-  actionButtonsRow: {
-    flexDirection: "row",
-    gap: spacing.sm,
-    flexWrap: "wrap",
-  },
-  btnTudoBem: {
-    flex: 1,
-    backgroundColor: colors.ok,
-    paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.sm,
-    borderRadius: rounded.sm,
-    height: 48,
-    minHeight: 48,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  btnTudoBemText: {
-    ...typography.caption,
-    color: colors.onPrimary,
-    fontWeight: "700",
-  },
-  btnEscalar: {
-    backgroundColor: "transparent",
-    borderWidth: 1,
-    borderColor: colors.lineStrong,
-    paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.sm,
-    borderRadius: rounded.sm,
-    height: 48,
-    minHeight: 48,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  btnEscalarText: {
-    ...typography.caption,
-    color: colors.ink,
-    fontWeight: "600",
-  },
-  reconhecerForm: {
-    gap: spacing.xs,
-  },
-  inputNota: {
-    ...typography.bodyLg,
-    height: 52, // DESIGN.md: text-input height 52px
+    minHeight: 52,
     borderWidth: 1,
     borderColor: colors.lineStrong,
     borderRadius: rounded.sm,
-    paddingHorizontal: spacing.md,
+    padding: spacing.sm,
     backgroundColor: colors.paper,
     color: colors.ink,
+    marginTop: spacing.sm,
   },
-  btnActionPrimary: {
+  btnPrimario: {
+    minHeight: 48,
+    marginTop: spacing.sm,
     backgroundColor: colors.primary,
-    paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.md,
     borderRadius: rounded.sm,
-    height: 48,
-    minHeight: 48,
-    justifyContent: "center",
     alignItems: "center",
-  },
-  btnActionPrimaryText: {
-    ...typography.buttonMd,
-    color: colors.onPrimary,
-  },
-  btnActionSecondary: {
-    paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.sm,
-    height: 48,
-    minHeight: 48,
     justifyContent: "center",
-    alignItems: "center",
+    paddingHorizontal: spacing.md,
   },
-  btnActionSecondaryText: {
-    ...typography.buttonMd,
-    color: colors.muted,
-  },
-  cardNotif: {
-    backgroundColor: colors.paper,
+  btnPrimarioText: { ...typography.buttonMd, color: colors.onPrimary },
+  btnSecundario: {
+    minHeight: 48,
     borderWidth: 1,
     borderColor: colors.line,
-    borderRadius: rounded.md,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-  },
-  cardNotifNaoLida: {
-    backgroundColor: colors.primarySoft,
-    borderColor: colors.primary,
-  },
-  notifTipo: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: colors.ink,
-  },
-  notifMensagem: {
-    ...typography.bodyMd,
-    color: colors.ink,
-    marginVertical: spacing.xxs,
-  },
-  marcarLidaText: {
-    ...typography.caption,
-    color: colors.primaryDeep,
-    fontWeight: "600",
-    marginTop: spacing.xxs,
-  },
-  emptyBox: {
-    padding: spacing.xl,
+    borderRadius: rounded.sm,
     alignItems: "center",
     justifyContent: "center",
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.paper,
   },
-  emptyTitle: {
-    ...typography.cuidadorHeadingCard,
-    color: colors.ink,
-    marginBottom: spacing.xs,
+  btnSecundarioLargo: {
+    minHeight: 48,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: rounded.sm,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: spacing.sm,
   },
-  emptyDesc: {
-    ...typography.bodyMd,
-    color: colors.muted,
-  },
+  btnSecundarioText: { ...typography.buttonMd, color: colors.ink },
+  secao: { ...typography.caption, color: colors.muted, marginTop: spacing.lg, marginBottom: spacing.xs, fontWeight: "600" },
+  vazio: { paddingVertical: spacing.xl, alignItems: "center" },
+  vazioTitulo: { ...typography.bodyLg, color: colors.ink, fontWeight: "600" },
+  vazioTexto: { ...typography.bodyMd, color: colors.muted, marginTop: spacing.xxs },
+  skeleton: { height: 96, borderRadius: rounded.md, backgroundColor: colors.paperDeep, marginBottom: spacing.sm },
 });

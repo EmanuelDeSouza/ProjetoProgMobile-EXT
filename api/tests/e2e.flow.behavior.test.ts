@@ -1,186 +1,116 @@
-import { describe, it, expect, beforeEach } from "bun:test";
-import { handleRequest } from "../src/app";
-import { signToken, hashPin } from "../src/auth";
+// SPEC §7 · Critério de pronto da V1, de ponta a ponta: HTTP de verdade + broker de verdade.
+import { describe, it, expect, beforeAll } from "bun:test";
+import { config } from "../src/config";
+import { clearDispatchedPushNotifications, dispatchedPushNotifications } from "../src/services/push";
 import {
-  dispatchedPushNotifications,
-  clearDispatchedPushNotifications,
-} from "../src/services/push";
-import { handleMqttMessage } from "../src/mqtt-listener";
+  api,
+  anunciarDispositivo,
+  ate,
+  conectarMqtt,
+  decifrarCredenciais,
+  emailUnico,
+  garantirListener,
+  primeiraMensagem,
+  publicar,
+} from "./helpers";
 
-describe("E2E Integration Flow · CuidaLar Completo (Caregiver, Morador, IoT, Regras, Push e SOS)", () => {
-  beforeEach(() => {
+function horaLocal(deslocMin: number): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: config.APP_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(Date.now() + deslocMin * 60_000));
+}
+
+async function parear(token: string, residenciaId: string, tipo: "sensor_contato" | "atuador_tomada", nome: string) {
+  const a = await anunciarDispositivo(tipo);
+  await Bun.sleep(300);
+  const r = await api("POST", `/residencias/${residenciaId}/dispositivos/parear`, {
+    token,
+    body: { codigo: a.codigo, tipo, nome, comodo: "Sala" },
+  });
+  expect(r.status).toBe(201);
+  const msg = await primeiraMensagem(a.cliente, `cuidalar/pareamento/${a.codigo}/credenciais`);
+  a.cliente.end(true);
+  const cred = decifrarCredenciais(a.chave, JSON.parse(msg!.toString()));
+  const cli = await conectarMqtt({ username: cred.dispositivoId, password: cred.deviceKey });
+  return { id: r.body.id as string, cli, topico: (x: string) => `cuidalar/${residenciaId}/${cred.dispositivoId}/${x}` };
+}
+
+describe("SPEC §7 · Loop completo da V1", () => {
+  beforeAll(async () => {
+    await garantirListener();
     clearDispatchedPushNotifications();
   });
 
-  it("Executa fluxo de ponta a ponta: Cuidador -> Pareamento -> Telemetria -> Regras -> Push Nativo -> SOS -> Cancelamento", async () => {
-    // 1. Cuidador Autenticado gera Token JWT
-    const cuidadorToken = await signToken({
-      sub: "cuidador-principal-id",
-      email: "cuidador.principal@cuidalar.com",
-      papel: "cuidador",
-    });
+  it("cadastro → residência → convite → pareamento → painel → comando confirmado → regra → alerta → reconhecer → morador PIN → SOS", async () => {
+    // 1. Cuidador cria conta e residência, convida segundo cuidador
+    const emailA = emailUnico("ana");
+    const a = await api("POST", "/usuarios", { body: { nome: "Ana", email: emailA, senha: "senha123" } });
+    const tA = a.body.token as string;
+    const res = await api("POST", "/residencias", { token: tA, body: { nome: "Casa da Vó Elza" } });
+    const rid = res.body.id as string;
+    const b = await api("POST", "/usuarios", { body: { nome: "Bruno", email: emailUnico("bruno"), senha: "senha123" } });
+    const tB = b.body.token as string;
+    await api("POST", "/usuarios/push-token", { token: tA, body: { pushToken: "ExponentPushToken[ana]" } });
+    await api("POST", "/usuarios/push-token", { token: tB, body: { pushToken: "ExponentPushToken[bruno]" } });
+    const conv = await api("POST", `/residencias/${rid}/convites`, { token: tA, body: { email: b.body.usuario.email } });
+    expect((await api("PATCH", `/convites/${conv.body.id}`, { token: tB, body: { status: "aceito" } })).status).toBe(200);
 
-    // 2. Cuidador Registra Push Token no Dispositivo Móvel (RF-15, RF-17)
-    const reqPush = new Request("http://localhost:3000/v1/usuarios/push-token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cuidadorToken}`,
-      },
-      body: JSON.stringify({
-        pushToken: "ExponentPushToken[cuidador_mobile_token_999]",
-      }),
-    });
-    // Se DB não estiver conectado, o endpoint trata com 500 ou 200, mas a validação e roteamento passam
-    const resPush = await handleRequest(reqPush);
-    expect([200, 500]).toContain(resPush.status);
+    // 2. Pareia um sensor e um atuador
+    const porta = await parear(tA, rid, "sensor_contato", "Porta");
+    const abajur = await parear(tB, rid, "atuador_tomada", "Abajur");
+    await publicar(porta.cli, porta.topico("heartbeat"), {});
+    await publicar(abajur.cli, abajur.topico("estado"), { tomada: "desligada" });
 
-    // 3. Validação do Contrato de Criação de Residência (RF-03)
-    const reqResidenciaInvalida = new Request("http://localhost:3000/v1/residencias", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cuidadorToken}`,
-      },
-      body: JSON.stringify({}), // sem 'nome'
+    // 3. Painel mostra estado real
+    const painel = await ate(async () => {
+      const p = await api("GET", `/residencias/${rid}/dispositivos`, { token: tA });
+      return p.body.every((d: { status: string }) => d.status === "online") ? p : null;
     });
-    const resResInvalida = await handleRequest(reqResidenciaInvalida);
-    expect(resResInvalida.status).toBe(400);
+    expect(painel.body.length).toBe(2);
 
-    // 4. Validação de Convite de Cuidador Adicional (RF-05)
-    const reqConviteInvalido = new Request("http://localhost:3000/v1/residencias/res-01/convites", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cuidadorToken}`,
-      },
-      body: JSON.stringify({ email: "email-invalido" }),
-    });
-    const resConviteInvalido = await handleRequest(reqConviteInvalido);
-    expect(resConviteInvalido.status).toBe(400);
-
-    // 5. Validação de Pareamento de Dispositivos (RF-06 & RF-07)
-    // Dispositivo com tipo não suportado na V1 (ex: 'camera_seguranca') deve ser rejeitado com 400
-    const reqParearInvalido = new Request(
-      "http://localhost:3000/v1/residencias/res-01/dispositivos/parear",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${cuidadorToken}`,
-        },
-        body: JSON.stringify({
-          codigo: "123456",
-          tipo: "camera_seguranca", // Proibido no SPEC RNF-12 / RF-06
-          nome: "Câmera Quarto",
-          comodo: "Quarto",
-        }),
+    // 4. Comando com confirmação vinda do dispositivo
+    abajur.cli.subscribe(abajur.topico("comando"), { qos: 1 });
+    abajur.cli.on("message", (t, p) => {
+      if (t === abajur.topico("comando")) {
+        const { acao } = JSON.parse(p.toString()) as { acao: string };
+        void publicar(abajur.cli, abajur.topico("estado"), { tomada: acao === "ligar" ? "ligada" : "desligada" });
       }
-    );
-    const resParearInvalido = await handleRequest(reqParearInvalido);
-    expect(resParearInvalido.status).toBe(400);
-
-    // Dispositivo válido: código com menos de 6 dígitos é rejeitado com 400
-    const reqParearCodigoCurto = new Request(
-      "http://localhost:3000/v1/residencias/res-01/dispositivos/parear",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${cuidadorToken}`,
-        },
-        body: JSON.stringify({
-          codigo: "123", // Inválido (deve ter 6 dígitos)
-          tipo: "atuador_tomada",
-          nome: "Tomada Abajur",
-          comodo: "Quarto",
-        }),
-      }
-    );
-    const resParearCurto = await handleRequest(reqParearCodigoCurto);
-    expect(resParearCurto.status).toBe(400);
-
-    // 6. Validação de Regra de Alerta (RF-12)
-    const reqRegraInvalida = new Request("http://localhost:3000/v1/residencias/res-01/regras", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cuidadorToken}`,
-      },
-      body: JSON.stringify({
-        dispositivoId: "disp-01",
-        condicao: "condicao_inexistente",
-        parametros: {},
-      }),
     });
-    const resRegraInvalida = await handleRequest(reqRegraInvalida);
-    expect(resRegraInvalida.status).toBe(400);
+    await Bun.sleep(200);
+    expect((await api("POST", `/dispositivos/${abajur.id}/comando`, { token: tA, body: { acao: "ligar" } })).status).toBe(202);
+    await ate(async () => {
+      const p = await api("GET", `/residencias/${rid}/dispositivos`, { token: tA });
+      return p.body.find((d: { id: string }) => d.id === abajur.id).estadoAtual.tomada === "ligada";
+    }, 8000);
 
-    // 7. Comando para Atuador (RF-10)
-    const reqComandoInvalido = new Request(
-      "http://localhost:3000/v1/dispositivos/disp-01/comando",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${cuidadorToken}`,
-        },
-        body: JSON.stringify({}), // sem 'acao'
-      }
-    );
-    const resComandoInvalido = await handleRequest(reqComandoInvalido);
-    expect(resComandoInvalido.status).toBe(400);
-
-    // 8. Morador: Login com PIN e Proteção contra Força Bruta (RF-04, RNF-08)
-    const reqMoradorPinInvalido = new Request(
-      "http://localhost:3000/v1/moradores/login-pin",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          moradorId: "morador-01",
-          pin: "12", // PIN incompleto
-        }),
-      }
-    );
-    const resMoradorInvalido = await handleRequest(reqMoradorPinInvalido);
-    expect(resMoradorInvalido.status).toBe(400);
-
-    // 9. Emergência SOS pelo Morador (RF-15)
-    const moradorToken = await signToken({
-      sub: "morador-01",
-      residenciaId: "res-01",
-      papel: "morador",
+    // 5. Regra → evento → alerta → notificação → reconhecer
+    const regra = await api("POST", `/residencias/${rid}/regras`, {
+      token: tA,
+      body: { dispositivoId: porta.id, condicao: "contato_aberto_apos_horario", parametros: { horario: horaLocal(-2), horarioFim: horaLocal(5) } },
     });
-
-    const reqSOSSemMorador = new Request("http://localhost:3000/v1/residencias/res-01/sos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${moradorToken}`,
-      },
-      body: JSON.stringify({}),
+    expect(regra.status).toBe(201);
+    await publicar(porta.cli, porta.topico("estado"), { contato: "aberto" });
+    const alerta = await ate(async () => {
+      const l = await api("GET", `/residencias/${rid}/alertas`, { token: tB });
+      return l.body[0];
     });
-    const resSOSSemMorador = await handleRequest(reqSOSSemMorador);
-    expect(resSOSSemMorador.status).toBe(400);
+    expect(alerta).toMatchObject({ status: "aberto", condicao: "contato_aberto_apos_horario", dispositivoId: porta.id });
+    const notifB = await api("GET", "/notificacoes", { token: tB });
+    expect(notifB.body.some((n: { tipo: string; alvoId: string }) => n.tipo === "alerta" && n.alvoId === alerta.id)).toBe(true);
+    expect((await api("PATCH", `/alertas/${alerta.id}`, { token: tB, body: { status: "reconhecido" } })).body.reconhecidoPor).toBe("Bruno");
 
-    // 10. Processamento Resiliente de Telemetria MQTT (docs/SPEC.md § 6.3)
-    // Tópico desconhecido é ignorado sem quebrar o processo
-    await handleMqttMessage("topico/invalido", Buffer.from("qualquer dado"));
-    // Payload corrompido é tratado sem quebrar
-    await handleMqttMessage(
-      "cuidalar/res-01/disp-01/estado",
-      Buffer.from("{ json quebrado: ")
-    );
+    // 6. Morador entra com PIN e aciona SOS; os dois cuidadores recebem push
+    const m = await api("POST", `/residencias/${rid}/moradores`, { token: tA, body: { nome: "Vó Elza", pin: "2468" } });
+    const lp = await api("POST", "/moradores/login-pin", { body: { moradorId: m.body.id, pin: "2468" } });
+    clearDispatchedPushNotifications();
+    const sos = await api("POST", `/residencias/${rid}/sos`, { token: lp.body.token, body: { moradorId: m.body.id } });
+    expect(sos.status).toBe(201);
+    expect(dispatchedPushNotifications.map((p) => p.token).sort()).toEqual(["ExponentPushToken[ana]", "ExponentPushToken[bruno]"]);
 
-    // 11. Central de Notificações (RF-17)
-    const reqNotifs = new Request("http://localhost:3000/v1/notificacoes", {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${cuidadorToken}`,
-      },
-    });
-    const resNotifs = await handleRequest(reqNotifs);
-    expect([200, 500]).toContain(resNotifs.status);
-  });
+    porta.cli.end(true);
+    abajur.cli.end(true);
+  }, 30_000);
 });

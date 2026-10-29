@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   View,
   Text,
@@ -11,8 +11,19 @@ import {
 } from "react-native";
 import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useResidence } from "../../context/ResidenceContext";
-import { apiRepository } from "../../services/api";
-import { type RegraAlerta, type CondicaoRegra } from "../../types";
+import { apiRepository, mensagemDeErro } from "../../services/api";
+import { parametrosRegra, primeiroErro } from "../../services/schemas";
+import { type RegraAlerta, type CondicaoRegra, type TipoDispositivo } from "../../types";
+
+// RF-12: cada condição vale para um tipo de sensor (null = qualquer dispositivo)
+const TIPO_DA_CONDICAO: Record<CondicaoRegra, TipoDispositivo | null> = {
+  sem_movimento_por: "sensor_presenca",
+  contato_aberto_apos_horario: "sensor_contato",
+  temperatura_fora_da_faixa: "sensor_temperatura",
+  dispositivo_offline: null,
+};
+
+const numero = (t: string) => Number(t.replace(",", "."));
 
 interface RegrasScreenProps {
   onBack: () => void;
@@ -36,6 +47,7 @@ export const RegrasScreen: React.FC<RegrasScreenProps> = ({ onBack }) => {
   const [condicao, setCondicao] = useState<CondicaoRegra>("sem_movimento_por");
   const [horasParam, setHorasParam] = useState("4");
   const [horarioParam, setHorarioParam] = useState("22:00");
+  const [horarioFimParam, setHorarioFimParam] = useState("06:00");
   const [tempMin, setTempMin] = useState("18");
   const [tempMax, setTempMax] = useState("28");
   const [saving, setSaving] = useState(false);
@@ -45,8 +57,8 @@ export const RegrasScreen: React.FC<RegrasScreenProps> = ({ onBack }) => {
     if (!selectedResidencia) return;
     setLoading(true);
     try {
-      const list = await apiRepository.listRegras(selectedResidencia.id);
-      setRegras(list);
+      const { dados } = await apiRepository.listRegras(selectedResidencia.id);
+      setRegras(dados);
     } catch {
       // Offline/cached
     } finally {
@@ -54,33 +66,39 @@ export const RegrasScreen: React.FC<RegrasScreenProps> = ({ onBack }) => {
     }
   };
 
+  const compativeis = useMemo(
+    () => dispositivos.filter((d) => TIPO_DA_CONDICAO[condicao] === null || d.tipo === TIPO_DA_CONDICAO[condicao]),
+    [dispositivos, condicao]
+  );
+
   useEffect(() => {
-    loadRegras();
-    if (dispositivos.length > 0 && !dispositivoId) {
-      setDispositivoId(dispositivos[0].id);
-    }
-  }, [selectedResidencia?.id, dispositivos]);
+    void loadRegras();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedResidencia?.id]);
+
+  useEffect(() => {
+    if (!compativeis.some((d) => d.id === dispositivoId)) setDispositivoId(compativeis[0]?.id ?? "");
+  }, [compativeis, dispositivoId]);
 
   const handleCreate = async () => {
     if (!selectedResidencia || !dispositivoId) {
-      setError("Selecione um dispositivo.");
+      setError("Escolha um dispositivo compatível com essa condição.");
       return;
     }
-
+    const brutos: Record<CondicaoRegra, unknown> = {
+      sem_movimento_por: { horas: numero(horasParam) },
+      contato_aberto_apos_horario: { horario: horarioParam.trim(), horarioFim: horarioFimParam.trim() },
+      temperatura_fora_da_faixa: { min: numero(tempMin), max: numero(tempMax) },
+      dispositivo_offline: {},
+    };
+    const parsed = parametrosRegra[condicao].safeParse(brutos[condicao]);
+    if (!parsed.success) {
+      setError(primeiroErro(parsed.error));
+      return;
+    }
+    const parametros = parsed.data as Record<string, unknown>;
     setSaving(true);
     setError(null);
-
-    let parametros: Record<string, unknown> = {};
-    if (condicao === "sem_movimento_por") {
-      parametros = { horas: parseFloat(horasParam) || 4 };
-    } else if (condicao === "contato_aberto_apos_horario") {
-      parametros = { horario: horarioParam || "22:00" };
-    } else if (condicao === "temperatura_fora_da_faixa") {
-      parametros = {
-        min: parseFloat(tempMin) || 18,
-        max: parseFloat(tempMax) || 28,
-      };
-    }
 
     try {
       await apiRepository.postRegraAlerta(selectedResidencia.id, {
@@ -91,7 +109,7 @@ export const RegrasScreen: React.FC<RegrasScreenProps> = ({ onBack }) => {
       await loadRegras();
       setShowCreate(false);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Erro ao salvar regra.");
+      setError(mensagemDeErro(err, "Erro ao salvar regra."));
     } finally {
       setSaving(false);
     }
@@ -102,7 +120,7 @@ export const RegrasScreen: React.FC<RegrasScreenProps> = ({ onBack }) => {
       return `Alerta após ${item.parametros?.horas ?? 4} horas sem movimento`;
     }
     if (item.condicao === "contato_aberto_apos_horario") {
-      return `Alerta se aberto após as ${item.parametros?.horario ?? "22:00"}`;
+      return `Alerta se ficar aberta entre ${String(item.parametros.horario ?? "22:00")} e ${String(item.parametros.horarioFim ?? "06:00")}`;
     }
     if (item.condicao === "temperatura_fora_da_faixa") {
       return `Faixa segura: ${item.parametros?.min ?? 18}°C a ${item.parametros?.max ?? 28}°C`;
@@ -136,30 +154,7 @@ export const RegrasScreen: React.FC<RegrasScreenProps> = ({ onBack }) => {
           <Text style={styles.formTitle}>Nova Regra de Alerta</Text>
           {error && <Text style={styles.errorText}>{error}</Text>}
 
-          <Text style={styles.label}>Dispositivo Alvo</Text>
-          <View style={styles.chipsRow}>
-            {dispositivos.map((d) => (
-              <TouchableOpacity
-                key={d.id}
-                style={[
-                  styles.dispChip,
-                  dispositivoId === d.id && styles.dispChipActive,
-                ]}
-                onPress={() => setDispositivoId(d.id)}
-              >
-                <Text
-                  style={[
-                    styles.dispChipText,
-                    dispositivoId === d.id && styles.dispChipTextActive,
-                  ]}
-                >
-                  {d.nome}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.label}>Condição do Alerta</Text>
+          <Text style={styles.label}>1. O que vigiar</Text>
           <View style={styles.chipsRow}>
             {CONDICOES.map((c) => (
               <TouchableOpacity
@@ -182,6 +177,33 @@ export const RegrasScreen: React.FC<RegrasScreenProps> = ({ onBack }) => {
             ))}
           </View>
 
+          <Text style={styles.label}>2. Em qual dispositivo</Text>
+          <View style={styles.chipsRow}>
+            {compativeis.length === 0 && (
+              <Text style={styles.errorText}>Nenhum dispositivo compatível com essa condição.</Text>
+            )}
+            {compativeis.map((d) => (
+              <TouchableOpacity
+                key={d.id}
+                style={[
+                  styles.dispChip,
+                  dispositivoId === d.id && styles.dispChipActive,
+                ]}
+                onPress={() => setDispositivoId(d.id)}
+              >
+                <Text
+                  style={[
+                    styles.dispChipText,
+                    dispositivoId === d.id && styles.dispChipTextActive,
+                  ]}
+                >
+                  {d.nome}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+
           {condicao === "sem_movimento_por" && (
             <>
               <Text style={styles.label}>Horas sem movimento</Text>
@@ -196,13 +218,16 @@ export const RegrasScreen: React.FC<RegrasScreenProps> = ({ onBack }) => {
 
           {condicao === "contato_aberto_apos_horario" && (
             <>
-              <Text style={styles.label}>Horário limite (HH:mm)</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="22:00"
-                value={horarioParam}
-                onChangeText={setHorarioParam}
-              />
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.label}>A partir de (HH:MM)</Text>
+                  <TextInput style={styles.input} placeholder="22:00" value={horarioParam} onChangeText={setHorarioParam} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.label}>Até (HH:MM)</Text>
+                  <TextInput style={styles.input} placeholder="06:00" value={horarioFimParam} onChangeText={setHorarioFimParam} />
+                </View>
+              </View>
             </>
           )}
 

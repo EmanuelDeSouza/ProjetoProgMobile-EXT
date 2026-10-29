@@ -10,7 +10,8 @@ import {
 } from "react-native";
 import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useResidence } from "../../context/ResidenceContext";
-import { apiRepository } from "../../services/api";
+import { apiRepository, mensagemDeErro } from "../../services/api";
+import { formConvite, primeiroErro } from "../../services/schemas";
 
 interface ConvidarCuidadorScreenProps {
   onBack: () => void;
@@ -27,8 +28,9 @@ export const ConvidarCuidadorScreen: React.FC<ConvidarCuidadorScreenProps> = ({
 
   const handleInvite = async () => {
     if (!selectedResidencia) return;
-    if (!email.trim() || !email.includes("@")) {
-      setError("Informe um e-mail válido.");
+    const parsed = formConvite.safeParse({ email });
+    if (!parsed.success) {
+      setError(primeiroErro(parsed.error));
       return;
     }
 
@@ -41,7 +43,7 @@ export const ConvidarCuidadorScreen: React.FC<ConvidarCuidadorScreenProps> = ({
       setSuccess(true);
       setEmail("");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Erro ao enviar convite.");
+      setError(mensagemDeErro(err, "Erro ao enviar convite."));
     } finally {
       setLoading(false);
     }

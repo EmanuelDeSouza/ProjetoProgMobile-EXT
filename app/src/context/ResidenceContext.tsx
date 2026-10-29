@@ -1,129 +1,150 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
-import { type ResidenciaComPapel, type Dispositivo } from "../types";
-import { apiRepository, ApiException } from "../services/api";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { Dispositivo, ResidenciaComPapel } from "../types";
+import { apiRepository, mensagemDeErro } from "../services/api";
+import { aguardarConfirmacao, estadoAlvo } from "../services/comando";
+import { local } from "../services/storage";
 import { useAuth } from "./AuthContext";
 
 interface ResidenceContextData {
   residencias: ResidenciaComPapel[];
   selectedResidencia: ResidenciaComPapel | null;
   dispositivos: Dispositivo[];
+  /** Primeira carga ainda sem nada para mostrar (esqueleto). */
   loading: boolean;
+  /** Mostrando último estado salvo (RNF-05). */
   isOffline: boolean;
+  erro: string | null;
   selectResidencia: (res: ResidenciaComPapel) => void;
   loadResidencias: () => Promise<void>;
   refreshDispositivos: () => Promise<void>;
+  /** RF-10: true só quando o dispositivo confirmar o novo estado. */
   controlarTomada: (dispositivoId: string, ligar: boolean) => Promise<boolean>;
 }
 
-const ResidenceContext = createContext<ResidenceContextData>({} as ResidenceContextData);
+const ResidenceContext = createContext<ResidenceContextData | null>(null);
+const CHAVE_SELECIONADA = "residencia_selecionada";
+const ATUALIZAR_A_CADA_MS = 15_000;
 
 export const ResidenceProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const { role, morador } = useAuth();
   const [residencias, setResidencias] = useState<ResidenciaComPapel[]>([]);
-  const [selectedResidencia, setSelectedResidencia] = useState<ResidenciaComPapel | null>(null);
+  const [selectedResidencia, setSelected] = useState<ResidenciaComPapel | null>(null);
   const [dispositivos, setDispositivos] = useState<Dispositivo[]>([]);
   const [loading, setLoading] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
+  const [erro, setErro] = useState<string | null>(null);
+  const comandando = useRef(0);
+
+  const residenciaId = role === "morador" ? morador?.residenciaId ?? null : selectedResidencia?.id ?? null;
+
+  // Troca de conta: limpa tudo que era do usuário anterior.
+  useEffect(() => {
+    setResidencias([]);
+    setSelected(null);
+    setDispositivos([]);
+    setIsOffline(false);
+    setErro(null);
+  }, [role, morador?.id]);
+
+  const selectResidencia = useCallback((r: ResidenciaComPapel) => {
+    setSelected(r);
+    setDispositivos([]);
+    void local.gravar(CHAVE_SELECIONADA, r.id);
+  }, []);
 
   const loadResidencias = useCallback(async () => {
     if (role !== "cuidador") return;
     setLoading(true);
     try {
-      const list = await apiRepository.getMinhasResidencias();
-      setResidencias(list);
-      setIsOffline(false);
-      if (list.length > 0 && !selectedResidencia) {
-        setSelectedResidencia(list[0]);
-      }
-    } catch {
-      setIsOffline(true);
+      const { dados, offline } = await apiRepository.getMinhasResidencias();
+      setResidencias(dados);
+      setIsOffline(offline);
+      setErro(null);
+      const salva = await local.ler<string>(CHAVE_SELECIONADA);
+      setSelected((atual) => {
+        const manter = atual && dados.find((r) => r.id === atual.id);
+        return manter ?? dados.find((r) => r.id === salva) ?? dados[0] ?? null;
+      });
+    } catch (e) {
+      setErro(mensagemDeErro(e));
     } finally {
       setLoading(false);
     }
-  }, [role, selectedResidencia]);
+  }, [role]);
 
   const refreshDispositivos = useCallback(async () => {
-    const resId = selectedResidencia?.id || morador?.residenciaId;
-    if (!resId) return;
-
-    setLoading(true);
+    if (!residenciaId) return;
+    setLoading((l) => l || dispositivos.length === 0);
     try {
-      const list = await apiRepository.listDispositivos(resId);
-      setDispositivos(list);
-      setIsOffline(false);
-    } catch {
-      setIsOffline(true);
+      const { dados, offline } = await apiRepository.listDispositivos(residenciaId);
+      // não sobrescreve enquanto um comando aguarda confirmação (o polling dele atualiza)
+      if (comandando.current === 0) setDispositivos(dados);
+      setIsOffline(offline);
+      setErro(null);
+    } catch (e) {
+      setErro(mensagemDeErro(e, "Não foi possível carregar o painel."));
     } finally {
       setLoading(false);
     }
-  }, [selectedResidencia?.id, morador?.residenciaId]);
+  }, [residenciaId, dispositivos.length]);
 
   useEffect(() => {
-    if (role === "cuidador") {
-      loadResidencias();
-    } else if (role === "morador" && morador?.residenciaId) {
-      refreshDispositivos();
-    }
-  }, [role, morador?.residenciaId, loadResidencias, refreshDispositivos]);
+    if (role === "cuidador") void loadResidencias();
+  }, [role, loadResidencias]);
 
+  // Painel sempre fresco: primeira carga + atualização periódica enquanto a tela está aberta.
   useEffect(() => {
-    if (selectedResidencia) {
-      refreshDispositivos();
-    }
-  }, [selectedResidencia, refreshDispositivos]);
+    if (!residenciaId) return;
+    void refreshDispositivos();
+    const t = setInterval(() => void refreshDispositivos(), ATUALIZAR_A_CADA_MS);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [residenciaId]);
 
-  // RF-10: Controlar atuador com timeout de 8 segundos e confirmação via estado retornado
-  const controlarTomada = async (dispositivoId: string, ligar: boolean): Promise<boolean> => {
-    const disp = dispositivos.find((d) => d.id === dispositivoId);
-    if (!disp || disp.status === "offline") {
-      throw new Error("Dispositivo offline, comando não pode ser enviado.");
-    }
-
-    const acao = ligar ? "ligar" : "desligar";
-    await apiRepository.postComandoDispositivo(dispositivoId, acao);
-
-    // Aguarda confirmação que volta via MQTT (polling de até 8 segundos conforme RF-10)
-    const targetEstado = ligar ? "ligada" : "desligada";
-    const resId = selectedResidencia?.id || morador?.residenciaId;
-    if (!resId) return false;
-
-    const startTime = Date.now();
-    while (Date.now() - startTime < 8000) {
-      await new Promise((r) => setTimeout(r, 1000));
-      try {
-        const updatedList = await apiRepository.listDispositivos(resId);
-        setDispositivos(updatedList);
-        const updatedDisp = updatedList.find((d) => d.id === dispositivoId);
-        if (updatedDisp && updatedDisp.estadoAtual?.tomada === targetEstado) {
-          return true; // Sucesso confirmado!
-        }
-      } catch {
-        // Se falhar a leitura na rede, segue tentativa até timeout
+  const controlarTomada = useCallback(
+    async (dispositivoId: string, ligar: boolean): Promise<boolean> => {
+      const disp = dispositivos.find((d) => d.id === dispositivoId);
+      if (!disp || disp.status === "offline" || isOffline || !residenciaId) {
+        throw new Error("Sem contato com este dispositivo agora.");
       }
-    }
-
-    return false; // Timeout de 8s excedido
-  };
-
-  return (
-    <ResidenceContext.Provider
-      value={{
-        residencias,
-        selectedResidencia,
-        dispositivos,
-        loading,
-        isOffline,
-        selectResidencia: setSelectedResidencia,
-        loadResidencias,
-        refreshDispositivos,
-        controlarTomada,
-      }}
-    >
-      {children}
-    </ResidenceContext.Provider>
+      const acao = ligar ? "ligar" : "desligar";
+      comandando.current += 1;
+      try {
+        await apiRepository.postComandoDispositivo(dispositivoId, acao);
+        return await aguardarConfirmacao(
+          () => apiRepository.listDispositivosAoVivo(residenciaId),
+          dispositivoId,
+          estadoAlvo(acao),
+          { aoAtualizar: setDispositivos }
+        );
+      } finally {
+        comandando.current -= 1;
+      }
+    },
+    [dispositivos, isOffline, residenciaId]
   );
+
+  const value = useMemo<ResidenceContextData>(
+    () => ({
+      residencias,
+      selectedResidencia,
+      dispositivos,
+      loading,
+      isOffline,
+      erro,
+      selectResidencia,
+      loadResidencias,
+      refreshDispositivos,
+      controlarTomada,
+    }),
+    [residencias, selectedResidencia, dispositivos, loading, isOffline, erro, selectResidencia, loadResidencias, refreshDispositivos, controlarTomada]
+  );
+
+  return <ResidenceContext.Provider value={value}>{children}</ResidenceContext.Provider>;
 };
 
-export function useResidence() {
-  return useContext(ResidenceContext);
+export function useResidence(): ResidenceContextData {
+  const ctx = useContext(ResidenceContext);
+  if (!ctx) throw new Error("useResidence fora do ResidenceProvider");
+  return ctx;
 }

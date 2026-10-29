@@ -16,5 +16,5 @@
       "@db/*": ["./db/*"]
     }
   },
-  "include": ["src/**/*", "db/**/*", "tests/**/*", "drizzle.config.ts"]
+  "include": ["src/**/*", "db/**/*", "tests/**/*", "scripts/**/*", "drizzle.config.ts"]
 }

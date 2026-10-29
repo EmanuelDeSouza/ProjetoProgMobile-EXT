@@ -31,11 +31,13 @@ Não invente cor, tipo ou botão fora de `DESIGN.md`. Hex e espaço no código: 
 ## Comandos
 
 ```
-docker compose up -d              # Postgres + broker MQTT (Mosquitto)
+docker compose up -d              # Postgres + broker MQTT (Mosquitto com dynamic security)
 cp api/.env.example api/.env
 cd api && bun install && bun run db:migrate && bun --watch src/index.ts
-cd api && bun test
+cd api && bun test                # usa o banco cuidalar_test (criado sozinho) + broker real
 cd api && bun run db:generate     # depois de mudar api/db/schema.ts
+cd api && bun run iot:simulate    # dispositivos simulados (ou -- --parear <tipo>)
+cd app && bun test && npx tsc --noEmit
 ```
 
 Health: `GET http://localhost:3000/v1/health` (200 só se Postgres e o broker respondem).
@@ -46,9 +48,13 @@ Env: `api/.env` (gitignored). Modelo: `api/.env.example`. Sem device key nem cli
 
 Postgres e Mosquitto locais via Docker na raiz. Schema TypeScript em `api/db/schema.ts`. Migration gerada: `bun run db:generate`. Aplicar: `bun run db:migrate`. Não edite SQL já aplicado: mude o schema e gere a próxima.
 
-Rotas públicas: `GET /v1/health`, `POST /v1/auth`, `POST /v1/moradores/login-pin`. O resto exige `Authorization: Bearer` (cuidador) ou o token de sessão do morador emitido pelo login-pin.
+Rotas públicas: `GET /v1/health`, `POST /v1/auth`, `POST /v1/usuarios` (cadastro), `POST /v1/moradores/login-pin`. O resto exige `Authorization: Bearer` (cuidador) ou o token de sessão do morador emitido pelo login-pin.
 
-Um serviço separado (`api/src/mqtt-listener.ts`) assina os tópicos `cuidalar/+/+/estado`, `cuidalar/+/+/heartbeat` e `cuidalar/+/+/sos`, grava em `eventos_dispositivo`, atualiza `dispositivos.estado_atual`/`status` e roda o motor de regras (RF-13 no SPEC). Não duplique essa lógica dentro de uma rota HTTP.
+Autorização (`api/src/authz.ts`): toda rota de residência confere o vínculo em `residencia_membros` (403 se não é membro, 404 se não existe). A sessão do morador só alcança `listDispositivos`, `postComandoDispositivo`, `postSOS` e o cancelamento em `patchSOS` — da própria casa. O `x-sessao` de cada operação no OpenAPI diz quem pode chamar.
+
+Broker: sem acesso anônimo. A API é admin do plugin *dynamic security* (`api/src/dynsec.ts`) e cria um usuário MQTT por dispositivo no pareamento, com ACL só dos próprios tópicos.
+
+Um serviço separado (`api/src/mqtt-listener.ts`) assina os tópicos `cuidalar/+/+/estado`, `cuidalar/+/+/heartbeat`, `cuidalar/+/+/sos` e `cuidalar/pareamento/+/anuncio`, valida o payload por tipo com Zod, grava em `eventos_dispositivo`, atualiza `dispositivos.estado_atual`/`status` e roda o motor de regras (RF-13 no SPEC). Não duplique essa lógica dentro de uma rota HTTP.
 
 Não crie `/login`, `/signin`, `/oauth/callback` fora do padrão do SPEC. Não use e-mail/senha de teste como PIN válido em produção — PIN do morador é hash, nunca texto puro no banco.
 
