@@ -1,41 +1,26 @@
-// Sistema de cache local para suporte offline (RNF-05)
-// Garante que painel e telas críticas não fiquem em branco na ausência de rede.
+// RNF-05 · Último estado conhecido, para nenhuma tela crítica ficar em branco offline.
+import { local } from "./storage";
 
-const memoryCache = new Map<string, string>();
+const PREFIXO = "cache:";
+const INDICE = "cache:__indice";
 
-export async function setCacheItem<T>(key: string, data: T): Promise<void> {
-  try {
-    const serialized = JSON.stringify(data);
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(key, serialized);
-    } else {
-      memoryCache.set(key, serialized);
-    }
-  } catch (err) {
-    console.warn(`Erro ao salvar cache para a chave ${key}:`, err);
-  }
+async function registrarChave(key: string): Promise<void> {
+  const indice = (await local.ler<string[]>(INDICE)) ?? [];
+  if (!indice.includes(key)) await local.gravar(INDICE, [...indice, key]);
+}
+
+export async function setCacheItem<T>(key: string, data: T | null): Promise<void> {
+  await local.gravar(PREFIXO + key, data);
+  if (data !== null) await registrarChave(key);
 }
 
 export async function getCacheItem<T>(key: string): Promise<T | null> {
-  try {
-    let serialized: string | null = null;
-    if (typeof localStorage !== "undefined") {
-      serialized = localStorage.getItem(key);
-    } else {
-      serialized = memoryCache.get(key) ?? null;
-    }
-
-    if (!serialized) return null;
-    return JSON.parse(serialized) as T;
-  } catch (err) {
-    console.warn(`Erro ao ler cache para a chave ${key}:`, err);
-    return null;
-  }
+  return local.ler<T>(PREFIXO + key);
 }
 
+/** Apaga o cache de dados (ao sair da conta: o próximo usuário não vê dados do anterior). */
 export async function clearCache(): Promise<void> {
-  if (typeof localStorage !== "undefined") {
-    localStorage.clear();
-  }
-  memoryCache.clear();
+  const indice = (await local.ler<string[]>(INDICE)) ?? [];
+  for (const k of indice) await local.gravar(PREFIXO + k, null);
+  await local.gravar(INDICE, null);
 }

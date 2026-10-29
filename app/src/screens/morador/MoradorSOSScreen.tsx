@@ -1,133 +1,146 @@
-import React, { useState, useEffect } from "react";
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  ActivityIndicator,
-} from "react-native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from "react-native";
 import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useAuth } from "../../context/AuthContext";
-import { apiRepository } from "../../services/api";
+import { ApiException, apiRepository } from "../../services/api";
 import { type SOSEvento } from "../../types";
 
 interface MoradorSOSScreenProps {
   onDismiss: () => void;
 }
 
+// RF-16: o servidor aceita cancelar até 30s; o app oferece 28s para sobrar margem de rede.
+const JANELA_CANCELAR_S = 28;
+
+type Estado = "enviando" | "enviado" | "falhou" | "cancelando" | "cancelado";
+
+/** RF-15/RF-16 · Confirma o envio só quando o servidor registrou. Se falhar, diz a verdade e tenta de novo. */
 export const MoradorSOSScreen: React.FC<MoradorSOSScreenProps> = ({ onDismiss }) => {
   const { morador } = useAuth();
-  const [sosEvento, setSosEvento] = useState<SOSEvento | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [canceling, setCanceling] = useState(false);
-  const [cancelado, setCancelado] = useState(false);
-  const [secondsRemaining, setSecondsRemaining] = useState(30);
+  const [estado, setEstado] = useState<Estado>("enviando");
+  const [sos, setSos] = useState<SOSEvento | null>(null);
+  const [restante, setRestante] = useState(JANELA_CANCELAR_S);
   const [horaEnvio, setHoraEnvio] = useState("");
+  const [erroCancelar, setErroCancelar] = useState<string | null>(null);
+  const tentativa = useRef(0);
 
-  useEffect(() => {
-    async function disparar() {
-      if (!morador?.residenciaId || !morador?.id) return;
-      try {
-        const now = new Date();
-        const horaFormatada = now.toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-        setHoraEnvio(horaFormatada);
-
-        const evento = await apiRepository.postSOS(morador.residenciaId, morador.id);
-        setSosEvento(evento);
-      } catch (err) {
-        console.error("Erro ao disparar SOS:", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    disparar();
-  }, [morador?.residenciaId, morador?.id]);
-
-  useEffect(() => {
-    if (loading || cancelado) return;
-    const interval = setInterval(() => {
-      setSecondsRemaining((prev) => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [loading, cancelado]);
-
-  const handleCancelar = async () => {
-    if (!sosEvento || secondsRemaining <= 0) return;
-    setCanceling(true);
+  const enviar = useCallback(async () => {
+    if (!morador) return;
+    tentativa.current += 1;
+    setEstado("enviando");
     try {
-      await apiRepository.patchSOS(sosEvento.id);
-      setCancelado(true);
+      const evento = await apiRepository.postSOS(morador.residenciaId, morador.id);
+      setSos(evento);
+      setHoraEnvio(new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }));
+      setRestante(JANELA_CANCELAR_S);
+      setEstado("enviado");
+    } catch {
+      setEstado("falhou");
+    }
+  }, [morador]);
+
+  useEffect(() => {
+    void enviar();
+  }, [enviar]);
+
+  // Sem rede: tenta de novo sozinho a cada 5s enquanto a tela estiver aberta.
+  useEffect(() => {
+    if (estado !== "falhou") return;
+    const t = setTimeout(() => void enviar(), 5000);
+    return () => clearTimeout(t);
+  }, [estado, enviar]);
+
+  useEffect(() => {
+    if (estado !== "enviado") return;
+    const t = setInterval(() => setRestante((s) => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [estado]);
+
+  const cancelar = async () => {
+    if (!sos || restante <= 0) return;
+    setErroCancelar(null);
+    setEstado("cancelando");
+    try {
+      await apiRepository.cancelarSOS(sos.id);
+      setEstado("cancelado");
     } catch (err) {
-      console.error("Erro ao cancelar SOS:", err);
-    } finally {
-      setCanceling(false);
+      setEstado("enviado");
+      setErroCancelar(
+        err instanceof ApiException && err.status === 409
+          ? "O tempo para cancelar acabou. A família já foi avisada."
+          : "Não foi possível cancelar agora. A família foi avisada do pedido."
+      );
+      if (err instanceof ApiException && err.status === 409) setRestante(0);
     }
   };
 
   return (
     <View style={styles.container}>
-      <View style={styles.card}>
-        <Text style={styles.iconeEmergencia}>🚨</Text>
-        <Text style={styles.titulo}>
-          {cancelado ? "Ajuda Cancelada" : "Pedido de Ajuda Enviado!"}
-        </Text>
+      <View style={styles.card} accessibilityLiveRegion="assertive">
+        <Text style={styles.iconeEmergencia}>{estado === "cancelado" ? "✅" : "🚨"}</Text>
 
-        {loading ? (
-          <ActivityIndicator size="large" color={colors.sos} style={{ marginVertical: 20 }} />
-        ) : cancelado ? (
+        {estado === "enviando" && (
           <>
-            <Text style={styles.mensagem}>
-              Você informou que foi sem querer. Seus cuidadores foram avisados do cancelamento.
+            <Text style={styles.titulo}>Enviando pedido de ajuda…</Text>
+            <ActivityIndicator size="large" color={colors.sos} style={{ marginVertical: spacing.lg }} />
+          </>
+        )}
+
+        {estado === "falhou" && (
+          <>
+            <Text style={styles.titulo}>Ainda não conseguimos enviar</Text>
+            <Text style={styles.mensagem}>Sem conexão com a internet. Estamos tentando de novo.</Text>
+            <Text style={styles.submensagem}>
+              Se tiver o botão de emergência da casa, aperte ele também. Ou ligue para alguém.
             </Text>
-            <TouchableOpacity style={styles.btnVoltar} onPress={onDismiss}>
-              <Text style={styles.btnVoltarText}>Voltar ao Início</Text>
+            <TouchableOpacity style={styles.btnVoltar} onPress={() => void enviar()} accessibilityRole="button">
+              <Text style={styles.btnVoltarText}>Tentar de novo agora</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.btnCancelar} onPress={onDismiss} accessibilityRole="button">
+              <Text style={styles.btnCancelarText}>Voltar</Text>
             </TouchableOpacity>
           </>
-        ) : (
-          <>
-            <Text style={styles.mensagem}>
-              Pedido de ajuda enviado às {horaEnvio}. A família foi avisada.
-            </Text>
-            <Text style={styles.submensagem}>
-              Fique calmo(a). Uma notificação urgente foi enviada para todos os cuidadores.
-            </Text>
+        )}
 
-            {secondsRemaining > 0 ? (
+        {(estado === "enviado" || estado === "cancelando") && (
+          <>
+            <Text style={styles.titulo}>Pedido de ajuda enviado</Text>
+            <Text style={styles.mensagem}>Enviado às {horaEnvio}. A família foi avisada.</Text>
+            {erroCancelar && <Text style={styles.submensagem}>{erroCancelar}</Text>}
+            {restante > 0 ? (
               <View style={styles.cancelArea}>
                 <TouchableOpacity
                   style={styles.btnCancelar}
-                  onPress={handleCancelar}
-                  disabled={canceling}
+                  onPress={() => void cancelar()}
+                  disabled={estado === "cancelando"}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Cancelar, foi sem querer. ${restante} segundos`}
                 >
-                  {canceling ? (
+                  {estado === "cancelando" ? (
                     <ActivityIndicator color={colors.ink} />
                   ) : (
-                    <Text style={styles.btnCancelarText}>
-                      Cancelar, foi sem querer ({secondsRemaining}s)
-                    </Text>
+                    <Text style={styles.btnCancelarText}>Cancelar, foi sem querer ({restante}s)</Text>
                   )}
                 </TouchableOpacity>
               </View>
             ) : (
               <View style={styles.areaFinalizada}>
-                <Text style={styles.tempoExpiradoText}>
-                  Tempo para cancelamento expirado. Seus cuidadores estão a caminho.
-                </Text>
-                <TouchableOpacity style={styles.btnVoltar} onPress={onDismiss}>
-                  <Text style={styles.btnVoltarText}>Voltar ao Painel</Text>
+                <Text style={styles.tempoExpiradoText}>Fique tranquilo(a). A família já sabe e vai entrar em contato.</Text>
+                <TouchableOpacity style={styles.btnVoltar} onPress={onDismiss} accessibilityRole="button">
+                  <Text style={styles.btnVoltarText}>Voltar ao início</Text>
                 </TouchableOpacity>
               </View>
             )}
+          </>
+        )}
+
+        {estado === "cancelado" && (
+          <>
+            <Text style={styles.titulo}>Pedido cancelado</Text>
+            <Text style={styles.mensagem}>A família foi avisada de que foi sem querer.</Text>
+            <TouchableOpacity style={styles.btnVoltar} onPress={onDismiss} accessibilityRole="button">
+              <Text style={styles.btnVoltarText}>Voltar ao início</Text>
+            </TouchableOpacity>
           </>
         )}
       </View>

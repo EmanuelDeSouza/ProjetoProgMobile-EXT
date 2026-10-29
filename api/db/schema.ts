@@ -6,6 +6,8 @@ import {
   integer,
   jsonb,
   uuid,
+  index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
@@ -35,7 +37,7 @@ export const residenciaMembros = pgTable("residencia_membros", {
     .notNull(),
   papel: text("papel", { enum: ["dono", "cuidador"] }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => [uniqueIndex("residencia_membros_residencia_usuario_uq").on(t.residenciaId, t.usuarioId)]);
 
 export const moradores = pgTable("moradores", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -45,6 +47,7 @@ export const moradores = pgTable("moradores", {
   nome: text("nome").notNull(),
   pinHash: text("pin_hash").notNull(),
   tentativasErradas: integer("tentativas_erradas").default(0).notNull(),
+  primeiraTentativaErradaEm: timestamp("primeira_tentativa_errada_em", { withTimezone: true }),
   bloqueadoAte: timestamp("bloqueado_ate", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
@@ -84,10 +87,22 @@ export const dispositivos = pgTable("dispositivos", {
     .default("offline")
     .notNull(),
   ultimoContatoEm: timestamp("ultimo_contato_em", { withTimezone: true }),
-  codigoPareamento: text("codigo_pareamento"),
-  codigoPareamentoExpiraEm: timestamp("codigo_pareamento_expira_em", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
+
+// RF-07 · Código anunciado pelo firmware via MQTT (SPEC 6.3), consumido pelo postPareamento.
+export const pareamentos = pgTable("pareamentos", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  codigo: text("codigo").notNull(),
+  tipo: text("tipo", { enum: tipoDispositivoEnum }).notNull(),
+  chave: text("chave").notNull(),
+  expiraEm: timestamp("expira_em", { withTimezone: true }).notNull(),
+  conflito: boolean("conflito").default(false).notNull(),
+  dispositivoId: uuid("dispositivo_id").references(() => dispositivos.id, { onDelete: "cascade" }),
+  usadoEm: timestamp("usado_em", { withTimezone: true }),
+  confirmadoEm: timestamp("confirmado_em", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [index("pareamentos_codigo_idx").on(t.codigo)]);
 
 export const condicaoRegraEnum = [
   "sem_movimento_por",
@@ -109,7 +124,7 @@ export const regrasAlerta = pgTable("regras_alerta", {
   parametros: jsonb("parametros").$type<Record<string, unknown>>().default({}).notNull(),
   ativa: boolean("ativa").default(true).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => [index("regras_alerta_dispositivo_idx").on(t.dispositivoId)]);
 
 export const alertas = pgTable("alertas", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -132,7 +147,7 @@ export const alertas = pgTable("alertas", {
   reconhecidoEm: timestamp("reconhecido_em", { withTimezone: true }),
   nota: text("nota"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => [index("alertas_residencia_created_idx").on(t.residenciaId, t.createdAt)]);
 
 export const sosEventos = pgTable("sos_eventos", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -142,12 +157,19 @@ export const sosEventos = pgTable("sos_eventos", {
   moradorId: uuid("morador_id").references(() => moradores.id, {
     onDelete: "set null",
   }),
+  dispositivoId: uuid("dispositivo_id").references(() => dispositivos.id, {
+    onDelete: "set null",
+  }),
   origem: text("origem", { enum: ["app", "botao_fisico"] }).notNull(),
   status: text("status", { enum: ["aberto", "cancelado_pelo_morador", "reconhecido"] })
     .default("aberto")
     .notNull(),
+  reconhecidoPor: uuid("reconhecido_por").references(() => usuarios.id, {
+    onDelete: "set null",
+  }),
+  reconhecidoEm: timestamp("reconhecido_em", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => [index("sos_eventos_residencia_created_idx").on(t.residenciaId, t.createdAt)]);
 
 export const eventosDispositivo = pgTable("eventos_dispositivo", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -157,18 +179,23 @@ export const eventosDispositivo = pgTable("eventos_dispositivo", {
   tipo: text("tipo").notNull(),
   valor: jsonb("valor").$type<Record<string, unknown>>().notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => [index("eventos_dispositivo_disp_created_idx").on(t.dispositivoId, t.createdAt)]);
 
 export const notificacoes = pgTable("notificacoes", {
   id: uuid("id").defaultRandom().primaryKey(),
   usuarioId: uuid("usuario_id")
     .references(() => usuarios.id, { onDelete: "cascade" })
     .notNull(),
-  tipo: text("tipo").notNull(),
+  residenciaId: uuid("residencia_id").references(() => residencias.id, {
+    onDelete: "cascade",
+  }),
+  tipo: text("tipo", { enum: ["alerta", "sos", "sos_cancelado", "convite"] }).notNull(),
   alvoId: uuid("alvo_id").notNull(),
+  titulo: text("titulo").default("").notNull(),
+  mensagem: text("mensagem").default("").notNull(),
   lidaEm: timestamp("lida_em", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => [index("notificacoes_usuario_created_idx").on(t.usuarioId, t.createdAt)]);
 
 // Relations
 export const usuariosRelations = relations(usuarios, ({ many }) => ({
@@ -287,6 +314,7 @@ export type Dispositivo = typeof dispositivos.$inferSelect;
 export type RegraAlerta = typeof regrasAlerta.$inferSelect;
 export type Alerta = typeof alertas.$inferSelect;
 export type SosEvento = typeof sosEventos.$inferSelect;
+export type Pareamento = typeof pareamentos.$inferSelect;
 export type EventoDispositivo = typeof eventosDispositivo.$inferSelect;
 export type Notificacao = typeof notificacoes.$inferSelect;
 

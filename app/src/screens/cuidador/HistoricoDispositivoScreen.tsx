@@ -9,7 +9,8 @@ import {
 } from "react-native";
 import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useResidence } from "../../context/ResidenceContext";
-import { apiRepository } from "../../services/api";
+import { apiRepository, mensagemDeErro } from "../../services/api";
+import { dataHora, descreverLeitura } from "../../services/descricao";
 import { type EventoDispositivo } from "../../types";
 
 interface HistoricoDispositivoScreenProps {
@@ -24,6 +25,7 @@ export const HistoricoDispositivoScreen: React.FC<HistoricoDispositivoScreenProp
   const { dispositivos } = useResidence();
   const [eventos, setEventos] = useState<EventoDispositivo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [aviso, setAviso] = useState<string | null>(null);
 
   const disp = dispositivos.find((d) => d.id === dispositivoId);
 
@@ -31,12 +33,11 @@ export const HistoricoDispositivoScreen: React.FC<HistoricoDispositivoScreenProp
     async function loadEventos() {
       setLoading(true);
       try {
-        const list = await apiRepository.listEventosDispositivo(dispositivoId);
-        // Filtra heartbeats (RF-18)
-        const relevantes = list.filter((e) => e.tipo !== "heartbeat");
-        setEventos(relevantes);
+        const { dados, offline } = await apiRepository.listEventosDispositivo(dispositivoId);
+        setEventos(dados);
+        setAviso(offline ? "Sem conexão. Mostrando o último histórico salvo." : null);
       } catch (err) {
-        console.warn("Erro ao carregar histórico:", err);
+        setAviso(mensagemDeErro(err, "Não foi possível carregar o histórico."));
       } finally {
         setLoading(false);
       }
@@ -44,12 +45,7 @@ export const HistoricoDispositivoScreen: React.FC<HistoricoDispositivoScreenProp
     loadEventos();
   }, [dispositivoId]);
 
-  const renderValor = (valor: Record<string, unknown>) => {
-    return Object.entries(valor)
-      .map(([k, v]) => `${k}: ${String(v)}`)
-      .join(" • ");
-  };
-
+  
   return (
     <View style={styles.container}>
       <TouchableOpacity style={styles.btnVoltar} onPress={onBack}>
@@ -58,8 +54,10 @@ export const HistoricoDispositivoScreen: React.FC<HistoricoDispositivoScreenProp
 
       <Text style={styles.title}>Histórico de Leituras</Text>
       <Text style={styles.subtitle}>
-        {disp ? `${disp.nome} (${disp.comodo})` : "Dispositivo"} — Últimos 7 dias
+        {disp ? `${disp.nome} (${disp.comodo})` : "Dispositivo"} — últimos 7 dias
       </Text>
+
+      {aviso && <Text style={styles.emptyDesc}>{aviso}</Text>}
 
       {loading ? (
         <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 40 }} />
@@ -79,15 +77,10 @@ export const HistoricoDispositivoScreen: React.FC<HistoricoDispositivoScreenProp
               <View style={styles.dot} />
               <View style={styles.cardEvento}>
                 <View style={styles.eventoHeader}>
-                  <Text style={styles.eventoTipo}>{item.tipo.toUpperCase()}</Text>
-                  <Text style={styles.eventoHora}>
-                    {new Date(item.createdAt).toLocaleString([], {
-                      dateStyle: "short",
-                      timeStyle: "short",
-                    })}
-                  </Text>
+                  <Text style={styles.eventoTipo}>{descreverLeitura(item.valor)}</Text>
+                  <Text style={styles.eventoHora}>{dataHora(item.createdAt)}</Text>
                 </View>
-                <Text style={styles.eventoValor}>{renderValor(item.valor)}</Text>
+                
               </View>
             </View>
           )}

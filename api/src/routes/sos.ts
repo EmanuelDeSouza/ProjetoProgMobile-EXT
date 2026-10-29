@@ -1,109 +1,104 @@
-import { eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { db } from "../db";
-import { sosEventos } from "../../db/schema";
-import { postSOSSchema, patchSOSSchema, formatErrorResponse, formatZodError } from "../schemas";
+import { moradores, sosEventos, usuarios, type SosEvento } from "../../db/schema";
+import { patchSOSSchema, postSOSSchema } from "../schemas";
 import { notifyCaregivers } from "../rules-engine";
+import { exigirCuidadorMembro, exigirMorador } from "../authz";
+import { HttpError, idDoPath, iso, lerCorpo, naoEncontrado, proibido } from "../http";
+import type { Contexto } from "../app";
 
-export async function handlePostSOS(
-  req: Request,
-  residenciaId: string
-): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return Response.json(
-      formatErrorResponse("INVALID_JSON", "O corpo da requisição deve ser um JSON válido."),
-      { status: 400 }
-    );
-  }
+const JANELA_CANCELAMENTO_MS = 30_000; // RF-16
 
-  const parsed = postSOSSchema.safeParse(body);
-  if (!parsed.success) {
-    return Response.json(formatZodError(parsed.error), { status: 400 });
-  }
-
-  const [sos] = await db
-    .insert(sosEventos)
-    .values({
-      residenciaId,
-      moradorId: parsed.data.moradorId,
-      origem: "app",
-      status: "aberto",
-    })
-    .returning();
-
-  if (!sos) {
-    return Response.json(
-      formatErrorResponse("INTERNAL_ERROR", "Falha ao registrar SOS."),
-      { status: 500 }
-    );
-  }
-
-  // Dispara notificação imediata a todos os cuidadores (RF-15: notificação de prioridade máxima por push)
-  await notifyCaregivers(residenciaId, "sos", sos.id, {
-    severidade: "alta",
-    titulo: "🚨 ALERTA SOS - Emergência!",
-    mensagem: "Pedido de ajuda acionado via aplicativo pelo morador.",
-  });
-
-  return Response.json(
-    {
-      id: sos.id,
-      moradorId: sos.moradorId,
-      origem: sos.origem,
-      status: sos.status,
-      createdAt: sos.createdAt.toISOString(),
-    },
-    { status: 201 }
-  );
+function sosJson(s: SosEvento, reconhecidoPor: string | null = null) {
+  return {
+    id: s.id,
+    moradorId: s.moradorId,
+    dispositivoId: s.dispositivoId,
+    origem: s.origem,
+    status: s.status,
+    reconhecidoPor,
+    reconhecidoEm: iso(s.reconhecidoEm),
+    createdAt: iso(s.createdAt),
+  };
 }
 
-export async function handlePatchSOS(
-  req: Request,
-  sosId: string
-): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return Response.json(
-      formatErrorResponse("INVALID_JSON", "O corpo da requisição deve ser um JSON válido."),
-      { status: 400 }
-    );
+async function comNome(s: SosEvento) {
+  if (!s.reconhecidoPor) return sosJson(s);
+  const [u] = await db.select({ nome: usuarios.nome }).from(usuarios).where(eq(usuarios.id, s.reconhecidoPor));
+  return sosJson(s, u?.nome ?? null);
+}
+
+/** RF-15 · cuidador vê os SOS (abertos primeiro). */
+export async function handleListSOS(ctx: Contexto): Promise<Response> {
+  const residenciaId = idDoPath(ctx.params[0], "Residência");
+  await exigirCuidadorMembro(ctx.sessao, residenciaId);
+  const lista = await db
+    .select({ sos: sosEventos, nome: usuarios.nome })
+    .from(sosEventos)
+    .leftJoin(usuarios, eq(sosEventos.reconhecidoPor, usuarios.id))
+    .where(eq(sosEventos.residenciaId, residenciaId))
+    .orderBy(sql`case when ${sosEventos.status} = 'aberto' then 0 else 1 end`, desc(sosEventos.createdAt))
+    .limit(100);
+  return Response.json(lista.map((l) => sosJson(l.sos, l.nome)));
+}
+
+/** RF-15 · só o aparelho do morador aciona pelo app, em nome dele mesmo. Direto, sem motor de regras. */
+export async function handlePostSOS(ctx: Contexto): Promise<Response> {
+  const residenciaId = idDoPath(ctx.params[0], "Residência");
+  const sessao = exigirMorador(ctx.sessao);
+  const body = await lerCorpo(ctx.req, postSOSSchema);
+  if (sessao.residenciaId !== residenciaId || sessao.moradorId !== body.moradorId) throw proibido();
+
+  const [morador] = await db.select().from(moradores).where(eq(moradores.id, sessao.moradorId));
+  const [sos] = await db
+    .insert(sosEventos)
+    .values({ residenciaId, moradorId: sessao.moradorId, origem: "app", status: "aberto" })
+    .returning();
+  if (!sos) throw new Error("falha ao registrar SOS");
+
+  await notifyCaregivers(residenciaId, "sos", sos.id, {
+    severidade: "alta",
+    titulo: "🚨 SOS — pedido de ajuda",
+    mensagem: `${morador?.nome ?? "O morador"} pediu ajuda pelo aplicativo. Verifique imediatamente.`,
+  });
+  return Response.json(sosJson(sos), { status: 201 });
+}
+
+/** RF-16 · morador cancela em até 30s; cuidador reconhece. */
+export async function handlePatchSOS(ctx: Contexto): Promise<Response> {
+  const sosId = idDoPath(ctx.params[0], "SOS");
+  const [sos] = await db.select().from(sosEventos).where(eq(sosEventos.id, sosId));
+  if (!sos) throw naoEncontrado("SOS");
+  const body = await lerCorpo(ctx.req, patchSOSSchema);
+
+  if (body.status === "cancelado_pelo_morador") {
+    const m = exigirMorador(ctx.sessao);
+    if (sos.moradorId !== m.moradorId) throw proibido("Só quem pediu ajuda pode cancelar.");
+    if (sos.status !== "aberto") throw new HttpError(409, "SOS_NOT_OPEN", "Este pedido de ajuda já foi encerrado.");
+    if (Date.now() - sos.createdAt.getTime() > JANELA_CANCELAMENTO_MS) {
+      throw new HttpError(409, "SOS_CANCEL_TIMEOUT", "Fora da janela de 30s para cancelamento do SOS.");
+    }
+    const [atualizado] = await db
+      .update(sosEventos)
+      .set({ status: "cancelado_pelo_morador" })
+      .where(eq(sosEventos.id, sosId))
+      .returning();
+    const [morador] = await db.select().from(moradores).where(eq(moradores.id, m.moradorId));
+    // Falso alarme também é informação de segurança: cuidadores são avisados, nada é apagado.
+    await notifyCaregivers(sos.residenciaId, "sos_cancelado", sos.id, {
+      severidade: "media",
+      titulo: "SOS cancelado pelo morador",
+      mensagem: `${morador?.nome ?? "O morador"} cancelou o pedido de ajuda: "foi sem querer".`,
+    });
+    return Response.json(sosJson(atualizado!));
   }
 
-  const parsed = patchSOSSchema.safeParse(body);
-  if (!parsed.success) {
-    return Response.json(formatZodError(parsed.error), { status: 400 });
-  }
-
-  const [existing] = await db.select().from(sosEventos).where(eq(sosEventos.id, sosId));
-  if (!existing) {
-    return Response.json(
-      formatErrorResponse("NOT_FOUND", "Evento SOS não encontrado."),
-      { status: 404 }
-    );
-  }
-
-  // RF-16: Cancela se acionado há menos de 30 segundos
-  const diffSeconds = (Date.now() - new Date(existing.createdAt).getTime()) / 1000;
-  if (diffSeconds > 30) {
-    return Response.json(
-      formatErrorResponse(
-        "SOS_CANCEL_TIMEOUT",
-        "Fora da janela de 30s para cancelamento do SOS."
-      ),
-      { status: 409 }
-    );
-  }
-
-  await db
+  const usuarioId = await exigirCuidadorMembro(ctx.sessao, sos.residenciaId);
+  if (sos.status === "reconhecido") return Response.json(await comNome(sos));
+  const [atualizado] = await db
     .update(sosEventos)
-    .set({
-      status: "cancelado_pelo_morador",
-    })
-    .where(eq(sosEventos.id, sosId));
-
-  return Response.json({ status: "ok" });
+    .set({ status: "reconhecido", reconhecidoPor: usuarioId, reconhecidoEm: new Date() })
+    .where(eq(sosEventos.id, sosId))
+    .returning();
+  return Response.json(await comNome(atualizado!));
 }

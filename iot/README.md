@@ -1,46 +1,46 @@
-# CuidaLar · Firmware IoT (ESP32)
+# CuidaLar · Firmware (ESP32)
 
-Este diretório contém os códigos-fonte dos firmwares para microcontroladores **ESP32** utilizados no CuidaLar, desenvolvidos no ecossistema Arduino/C++.
+Contrato com o servidor: [`docs/SPEC.md` seção 6.3](../docs/SPEC.md) (tópicos, payloads e pareamento). Mudou payload → mudou contrato: atualize a seção 6.3 no mesmo commit.
 
-## Contrato de Comunicação (MQTT)
-
-Conforme especificado em `docs/SPEC.md` (Seção 6.3), os dispositivos comunicam-se com o broker Mosquitto via MQTT sobre TLS (ou TCP local para desenvolvimento):
-
-### Tópicos por dispositivo
+## Estrutura
 
 ```
-cuidalar/{residencia_id}/{dispositivo_id}/estado      — Dispositivo publica leitura/estado
-cuidalar/{residencia_id}/{dispositivo_id}/heartbeat   — Dispositivo publica a cada 60s
-cuidalar/{residencia_id}/{dispositivo_id}/comando     — Servidor publica, dispositivo assina (atuadores)
-cuidalar/{residencia_id}/{dispositivo_id}/sos         — Dispositivo publica emergência (QoS 1)
+iot/
+├── libraries/CuidaLarCore/   biblioteca comum: portal Wi-Fi, pareamento, MQTT, heartbeat
+├── sensor_presenca/          PIR no GPIO13              → {"presenca": true|false}
+├── sensor_contato/           reed switch no GPIO14       → {"contato": "aberto"|"fechado"}
+├── sensor_temperatura/       DHT22 no GPIO4              → {"temperatura": 23.4, "umidade": 55}
+├── atuador_tomada/           relé no GPIO23              ← {"acao": "ligar"|"desligar"}  → {"tomada": "ligada"|"desligada"}
+└── botao_sos/                botão no GPIO15 (segurar 1 s) → .../sos {"emergencia": true}
 ```
 
-### Payloads JSON estáveis por tipo
+## Preparar o Arduino IDE
 
-1. **Sensor de Presença (`sensor_presenca`)**:
-   - `.../estado`: `{"presenca": true}` ou `{"presenca": false}`
-2. **Sensor de Contato (`sensor_contato`)**:
-   - `.../estado`: `{"contato": "aberto"}` ou `{"contato": "fechado"}`
-3. **Sensor de Temperatura e Umidade (`sensor_temperatura`)**:
-   - `.../estado`: `{"temperatura": 24.5, "umidade": 58.0}`
-4. **Atuador de Tomada (`atuador_tomada`)**:
-   - Inscrição em `.../comando`: `{"acao": "ligar"}` ou `{"acao": "desligar"}`
-   - Confirmação em `.../estado`: `{"tomada": "ligada"}` ou `{"tomada": "desligada"}`
-5. **Botão de Emergência SOS (`botao_sos`)**:
-   - `.../sos`: `{"emergencia": true, "timestamp": 1718000000}` (QoS 1)
+1. Placas: instale **esp32 by Espressif Systems** (Gerenciador de Placas).
+2. Bibliotecas (Gerenciador de Bibliotecas): **WiFiManager** (tzapu), **PubSubClient** (Nick O'Leary), **ArduinoJson** (v7) e, para o sensor de temperatura, **DHT sensor library** (Adafruit).
+3. Aponte o *Sketchbook location* (Arquivo → Preferências) para esta pasta `iot/`. Assim o IDE enxerga `libraries/CuidaLarCore` sem copiar nada. Se preferir, copie `libraries/CuidaLarCore` para `Documentos/Arduino/libraries/`.
+4. Abra o sketch do dispositivo, escolha a placa (ex.: *ESP32 Dev Module*) e grave.
 
-## Fluxo de Pareamento (RF-07)
+Credencial de provisionamento: `libraries/CuidaLarCore/src/CuidaLarConfig.h` (`CUIDALAR_PROVISIONAMENTO_*`) tem de bater com `MQTT_PROVISIONING_*` do `api/.env`. Nenhuma device key vai no código: cada dispositivo recebe a sua no pareamento.
 
-1. Ao ligar pela primeira vez (ou se não houver credenciais salvas em NVS/EEPROM), o ESP32 entra em modo **Access Point (AP)** com SSID `CuidaLar-Setup-XXXX`.
-2. O firmware gera um código de pareamento de 6 dígitos numéricos (válido por 10 minutos) e o exibe via Serial (e display caso presente).
-3. O cuidador digita esse código no app.
-4. O servidor associa o código à residência e emite as credenciais MQTT (`residencia_id`, `dispositivo_id`, `device_key`).
-5. O dispositivo recebe a configuração Wi-Fi e as credenciais, salva na memória não volátil e reinicia no modo de operação normal.
+## Pareamento (RF-07)
 
-## Estrutura de Pastas
+1. Ligue o ESP32 novo. Ele gera um **código de 6 dígitos** e abre a rede Wi-Fi **`CuidaLar-Setup-XXXX`** (LED piscando).
+2. Conecte o celular nessa rede. A página que abre mostra o **código** e pede:
+   - o Wi-Fi da casa (nome e senha),
+   - o **endereço do servidor** (IP do computador que roda o `docker compose`, ex.: `192.168.0.10`) e a porta (1883).
+3. Salve. O ESP32 entra no Wi-Fi da casa e **anuncia o código** ao servidor.
+4. No app do cuidador: **+ Parear** → digite o código, escolha o mesmo tipo do dispositivo, nome e cômodo. Prazo: 10 minutos.
+5. O servidor cria um usuário MQTT só para esse dispositivo e manda a credencial **cifrada** (AES-256-GCM com a chave que o próprio ESP32 gerou). O ESP32 grava, pisca rápido e reinicia já online.
 
-- `sensor_presenca/`: Firmware para detector de movimento PIR
-- `sensor_contato/`: Firmware para sensor de porta/janela magnético
-- `sensor_temperatura/`: Firmware para medição de temperatura e umidade (DHT22)
-- `atuador_tomada/`: Firmware para acionamento de relé com confirmação de estado
-- `botao_sos/`: Firmware para botão físico dedicado de emergência com QoS 1
+Para parear de novo (trocou de casa, de Wi-Fi ou de servidor): **segure o botão BOOT por 5 s logo depois de ligar**. O dispositivo antigo continua no painel como offline.
+
+## Segurança (RNF-07)
+
+- O broker não aceita conexão anônima. Cada dispositivo só publica nos próprios tópicos e só assina o próprio `.../comando` (ACL criada pela API no Mosquitto *dynamic security*).
+- O usuário `provisionamento` (compartilhado, gravado no firmware) só consegue anunciar um código e receber credenciais cifradas — não lê nem publica telemetria.
+- **TLS em produção**: gere os certificados com `mosquitto/gerar-certificados.sh <ip-ou-host>`, descomente o listener 8883 em `mosquitto/config/mosquitto.conf`, compile o firmware com `#define CUIDALAR_MQTT_TLS 1` e cole `mosquitto/certs/ca.crt` em `CUIDALAR_CA_PEM` (`CuidaLarConfig.h`).
+
+## Sem hardware
+
+`cd api && bun run iot:simulate` simula todos os dispositivos do banco. `bun run iot:simulate -- --parear sensor_contato` faz exatamente o fluxo acima (anuncia, espera o app, decifra a credencial) sem ESP32.

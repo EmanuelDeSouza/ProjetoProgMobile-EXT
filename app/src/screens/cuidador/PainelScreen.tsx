@@ -12,6 +12,7 @@ import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useResidence } from "../../context/ResidenceContext";
 import { useAuth } from "../../context/AuthContext";
 import { type Dispositivo } from "../../types";
+import { descreverEstado, horaCurta } from "../../services/descricao";
 
 interface PainelScreenProps {
   onNavigateToParear: () => void;
@@ -38,6 +39,7 @@ export const PainelScreen: React.FC<PainelScreenProps> = ({
     dispositivos,
     loading,
     isOffline,
+    erro,
     refreshDispositivos,
     controlarTomada,
   } = useResidence();
@@ -93,21 +95,7 @@ export const PainelScreen: React.FC<PainelScreenProps> = ({
     const isControlling = controllingId === disp.id;
     const feedback = commandFeedback[disp.id];
 
-    let estadoTexto = "Sem leitura recente";
-    if (disp.tipo === "atuador_tomada") {
-      const ligada = disp.estadoAtual?.tomada === "ligada";
-      estadoTexto = ligada ? "Tomada Ligada" : "Tomada Desligada";
-    } else if (disp.tipo === "sensor_presenca") {
-      estadoTexto = disp.estadoAtual?.presenca ? "Movimento detectado" : "Sem movimento";
-    } else if (disp.tipo === "sensor_contato") {
-      estadoTexto = disp.estadoAtual?.contato === "aberto" ? "Aberto" : "Fechado";
-    } else if (disp.tipo === "sensor_temperatura") {
-      const t = disp.estadoAtual?.temperatura;
-      const u = disp.estadoAtual?.umidade;
-      estadoTexto = t !== undefined ? `${t}°C • ${u}% umidade` : "Aguardando leitura";
-    } else if (disp.tipo === "botao_sos") {
-      estadoTexto = "Botão de emergência ativo";
-    }
+    const estadoTexto = descreverEstado(disp);
 
     return (
       <View
@@ -131,7 +119,7 @@ export const PainelScreen: React.FC<PainelScreenProps> = ({
                 isDispOffline ? styles.chipTextOffline : styles.chipTextOnline,
               ]}
             >
-              {isDispOffline ? "Offline" : "Online"}
+              {isDispOffline ? "● Sem contato" : "● Online"}
             </Text>
           </View>
         </View>
@@ -141,10 +129,7 @@ export const PainelScreen: React.FC<PainelScreenProps> = ({
         {isDispOffline && disp.ultimoContatoEm && (
           <Text style={styles.cardOfflineAviso}>
             Sem contato com este dispositivo desde{" "}
-            {new Date(disp.ultimoContatoEm).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
+            {horaCurta(disp.ultimoContatoEm)}
           </Text>
         )}
 
@@ -153,7 +138,7 @@ export const PainelScreen: React.FC<PainelScreenProps> = ({
         )}
 
         <View style={styles.cardActionsRow}>
-          {disp.tipo === "atuador_tomada" && (
+          {disp.tipo === "atuador_tomada" && !isDispOffline && !isOffline && (
             <TouchableOpacity
               style={[
                 styles.btnControle,
@@ -199,11 +184,17 @@ export const PainelScreen: React.FC<PainelScreenProps> = ({
           <TouchableOpacity style={styles.iconButton} onPress={onNavigateToAlertas}>
             <Text style={styles.iconButtonText}>🔔 Alertas</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={logout}>
+          <TouchableOpacity style={styles.iconButton} onPress={() => void logout()}>
             <Text style={styles.logoutText}>Sair</Text>
           </TouchableOpacity>
         </View>
       </View>
+
+      {erro && !isOffline && (
+        <View style={[styles.offlineBanner, { backgroundColor: colors.dangerSoft }]}>
+          <Text style={[styles.offlineBannerText, { color: colors.danger }]}>{erro}</Text>
+        </View>
+      )}
 
       {/* RNF-05: Aviso de aplicativo offline */}
       {isOffline && (
@@ -235,13 +226,14 @@ export const PainelScreen: React.FC<PainelScreenProps> = ({
         refreshControl={
           <RefreshControl
             refreshing={loading}
-            onRefresh={refreshDispositivos}
+            onRefresh={() => void refreshDispositivos()}
             colors={[colors.primary]}
           />
         }
       >
         {loading && dispositivos.length === 0 ? (
           <View style={styles.skeletonContainer}>
+            <View style={styles.skeletonCard} />
             <View style={styles.skeletonCard} />
             <View style={styles.skeletonCard} />
           </View>

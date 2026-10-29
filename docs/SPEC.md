@@ -71,9 +71,12 @@ Given: cuidador com conta criada.
 When: informa e-mail/senha (ou completa o Google Sign-In).
 Then: recebe `token` e o `usuario` (id, nome, email).
 
-Regras: sem confirmação de e-mail bloqueante na V1 (fora de escopo: recuperação de senha completa fica para V1.1, mas o endpoint existe).
-Falhas: 401 credenciais inválidas.
-API: `postAuth` · `getMe`
+Cadastro: quem ainda não tem conta cria com nome, e-mail e senha (`postUsuario`) e já sai logado. Login com e-mail que não existe **não** cria conta — é 401.
+Google: o servidor valida o ID token do Google (assinatura, emissor, `aud` = client id configurado em `GOOGLE_CLIENT_IDS`, e-mail verificado). Sem client id configurado, o login Google responde 401 e o app esconde o botão.
+
+Regras: sem confirmação de e-mail bloqueante na V1 (recuperação de senha fica para V1.1). Senha com no mínimo 6 caracteres.
+Falhas: 401 credenciais inválidas. 409 e-mail já cadastrado (no cadastro).
+API: `postAuth` · `postUsuario` · `getMe`
 
 **RF-02 · Papel por residência**
 
@@ -107,9 +110,11 @@ Given: cuidador dono ou vinculado à residência.
 When: cadastra nome do morador e um PIN de 4 dígitos.
 Then: 201, perfil de morador criado, vinculado à residência. O tablet/celular fixado na casa entra nesse perfil com o PIN — não com e-mail e senha.
 
+Aparelho da casa: o cuidador escolhe "Usar este aparelho para [morador]" (lista vinda de `listMoradores`). O aparelho guarda o id do morador e, daí em diante, mostra só o teclado de PIN — o morador nunca digita id nenhum.
+
 Regras: PIN não é o mesmo mecanismo de autenticação do cuidador (RF-01); ele autoriza só a interface simplificada, sem acesso a configuração de regras ou dados de outra residência.
-Falhas: PIN incorreto → mensagem simples, sem contagem de tentativas visível na V1 (mitigação de força bruta fica documentada como risco conhecido, ver RNF-08).
-API: `postMorador` · `postLoginPin`
+Falhas: PIN incorreto → mensagem simples, sem contagem de tentativas visível. 5 erros em 10 minutos → 429 e bloqueio de 10 minutos (RNF-08).
+API: `listMoradores` · `postMorador` · `postLoginPin`
 
 **RF-05 · Convidar outro cuidador**
 
@@ -117,9 +122,9 @@ Mais de um filho cuidando do mesmo pai/mãe é o caso comum, não a exceção.
 
 Given: cuidador vinculado à residência.
 When: envia convite por e-mail.
-Then: 201, convite pendente. Se o convidado já tem conta, aparece notificação para aceitar; se não tem, recebe e-mail para se cadastrar e já entra vinculado.
+Then: 201, convite pendente. Se o convidado já tem conta, aparece notificação (tipo `convite`) para aceitar; se não tem, ao se cadastrar com aquele e-mail já entra vinculado.
 
-Regras: só cuidadores existentes da residência podem convidar. Sem limite de cuidadores por residência na V1.
+Regras: só cuidadores existentes da residência podem convidar. Só o dono do e-mail convidado aceita. Convidar quem já é cuidador da casa → 409. Sem limite de cuidadores por residência na V1. Envio de e-mail real (SMTP) fica para V1.1 — na V1 o convidado sem conta é avisado pelo cuidador que convidou.
 API: `postConvite` · `patchConvite`
 
 ### 2.3 Dispositivos e pareamento
@@ -140,14 +145,14 @@ Regras: qualquer outro `tipo` é rejeitado pelo servidor no pareamento (400).
 
 **RF-07 · Parear dispositivo**
 
-O ESP32 gera um código curto ao ligar pela primeira vez (modo AP local). O cuidador digita esse código no app para vincular o dispositivo à residência.
+O ESP32 sem credencial abre um portal Wi-Fi local (`CuidaLar-Setup-XXXX`) onde alguém da casa informa a rede Wi-Fi e o endereço do broker. Conectado, ele gera um código de 6 dígitos e o anuncia ao servidor pelo MQTT (seção 6.3). O cuidador digita esse código no app para vincular o dispositivo à residência.
 
-Given: cuidador na residência, dispositivo em modo de pareamento exibindo um código de 6 dígitos.
-When: o cuidador informa o código, o cômodo e um nome amigável ("Sensor - Quarto").
-Then: 201, dispositivo vinculado à residência, credencial MQTT (device key) gerada e enviada ao firmware via o próprio fluxo de pareamento local (não pelo app).
+Given: cuidador na residência, dispositivo em modo de pareamento exibindo um código de 6 dígitos que já foi anunciado.
+When: o cuidador informa o código, o tipo, o cômodo e um nome amigável ("Sensor - Quarto").
+Then: 201, dispositivo vinculado à residência, credencial MQTT própria (usuário = id do dispositivo, senha = device key) criada no broker e enviada ao firmware **pelo broker, criptografada** com a chave que o próprio dispositivo anunciou (nunca pelo app).
 
-Regras: código de pareamento expira em 10 minutos. Um dispositivo pertence a uma única residência.
-Falhas: código expirado ou já usado → 409, "Gere um novo código no dispositivo".
+Regras: código de pareamento expira em 10 minutos. Um dispositivo pertence a uma única residência. O tipo informado no app tem de ser o tipo anunciado pelo firmware. Se o mesmo código for anunciado com chaves diferentes, ele é invalidado (alguém tentando sequestrar o pareamento).
+Falhas: código expirado, já usado ou nunca anunciado → 409, "Gere um novo código no dispositivo". Broker fora do ar → 503.
 API: `postPareamento`
 
 **RF-08 · Estado online/offline**
@@ -179,7 +184,8 @@ When: a pessoa toca o botão grande de ligar/desligar.
 Then: o app envia o comando; enquanto aguarda confirmação do dispositivo, o botão mostra estado "enviando"; ao confirmar, atualiza para o novo estado.
 
 Regras: comando para dispositivo offline é recusado antes de sair do app (sem fingir sucesso). Timeout de confirmação: 8 segundos.
-Falhas: dispositivo não confirma → "Não foi possível confirmar. Verifique se o dispositivo está ligado." + tentar de novo.
+Falhas: dispositivo não confirma → "Não foi possível confirmar. Verifique se o dispositivo está ligado." + tentar de novo. Broker fora do ar → 503, mesma mensagem.
+Quem pode: cuidador da residência e o morador da casa (é o "botão grande" do painel simplificado).
 API: `postComandoDispositivo`
 
 **RF-11 · Interface simplificada do morador**
@@ -199,7 +205,7 @@ Given: cuidador vinculado à residência, com pelo menos um sensor pareado.
 When: cria uma regra escolhendo o dispositivo (ou "qualquer sensor de presença da casa"), a condição (`sem_movimento_por`, `contato_aberto_apos_horario`, `temperatura_fora_da_faixa`, `dispositivo_offline`) e o parâmetro (horas, horário, faixa de temperatura).
 Then: 201, regra `ativa`.
 
-Regras: uma regra pertence a um dispositivo específico ou a um tipo dentro da residência. Sem regras compostas (E/OU) na V1.
+Regras: na V1 toda regra aponta para um dispositivo específico (o OpenAPI exige `dispositivoId`); "qualquer sensor de presença" fica para V1.1. A condição tem de combinar com o tipo do dispositivo (presença ↔ `sem_movimento_por`, contato ↔ `contato_aberto_apos_horario`, temperatura ↔ `temperatura_fora_da_faixa`; `dispositivo_offline` vale para qualquer tipo). Parâmetros validados por condição (ver `postRegraAlerta`). Horários usam o fuso da instalação (`APP_TIMEZONE`, padrão America/Sao_Paulo). Sem regras compostas (E/OU) na V1.
 API: `postRegraAlerta` · `listRegras`
 
 **RF-13 · Motor de avaliação**
@@ -210,14 +216,14 @@ Given: evento de sensor recebido pelo servidor (via MQTT → backend).
 When: o evento (ou a ausência de evento, no caso de `sem_movimento_por`) satisfaz a condição de uma regra ativa.
 Then: o servidor cria um `alerta` com severidade e dispara notificação (RF-14) para todos os cuidadores da residência.
 
-Regras: a mesma condição não gera um segundo alerta enquanto o primeiro estiver `aberto` (evita spam do mesmo evento). Reavaliação de "sem movimento" roda a cada 5 minutos no servidor, não por evento (não há evento para "nada aconteceu").
+Regras: a mesma condição não gera um segundo alerta enquanto o primeiro estiver `aberto` (evita spam do mesmo evento). "Sem movimento" conta a partir da última leitura com `presenca: true` (heartbeat não conta como movimento; sem nenhuma leitura, conta a partir do pareamento) e é reavaliado periodicamente no servidor, não por evento (não há evento para "nada aconteceu"). "Contato aberto após horário" também é reavaliado periodicamente: porta aberta às 21:50 e ainda aberta às 22:00 dispara. Dispositivo offline não gera alerta de "sem movimento" — gera o alerta de sistema da RF-08.
 API: processamento interno; alertas aparecem em `listAlertas`
 
 **RF-14 · Notificar e reconhecer alerta**
 
 Given: alerta `aberto`.
 When: cuidador abre a notificação e toca "Verifiquei, está tudo bem" ou "Preciso de ajuda / escalar".
-Then: alerta muda para `reconhecido` (com quem reconheceu e quando) ou permanece aberto com uma nota, visível aos outros cuidadores da residência.
+Then: alerta muda para `reconhecido` (com quem reconheceu e quando) ou permanece `aberto` com uma nota obrigatória, visível aos outros cuidadores da residência.
 
 Regras: qualquer cuidador da residência pode reconhecer, não só quem recebeu primeiro — evita que duas pessoas fiquem endereçando o mesmo risco sem saber uma da outra depois que uma já resolveu.
 API: `listAlertas` · `patchAlerta`
@@ -230,15 +236,15 @@ Given: morador em casa (perfil simplificado) ou botão físico `botao_sos` insta
 When: toca o botão grande de emergência no app, ou pressiona o botão físico.
 Then: 201, evento SOS criado com severidade máxima; notificação enviada **imediatamente** a todos os cuidadores da residência, por push, ignorando qualquer preferência de "não perturbar".
 
-Regras: SOS não passa pelo motor de regras — é direto. Confirmação de envio aparece na tela do morador ("Pedido de ajuda enviado às 14:32").
+Regras: SOS não passa pelo motor de regras — é direto. Confirmação de envio aparece na tela do morador ("Pedido de ajuda enviado às 14:32"). Só a sessão do morador aciona pelo app, e só em nome dele mesmo. O cuidador vê os SOS em `listSOS` (sempre no topo, separado dos alertas comuns) e marca `reconhecido` com `patchSOS`.
 Falhas: se o app estiver offline no celular do morador, o botão físico (`botao_sos`, que conecta direto por Wi-Fi ao broker) ainda funciona, porque não depende do app estar aberto.
-API: `postSOS`
+API: `postSOS` · `listSOS` · `patchSOS` (reconhecer)
 
 **RF-16 · Cancelar SOS acidental**
 
 Given: SOS acionado há menos de 30 segundos.
 When: o morador toca "Cancelar, foi sem querer".
-Then: o evento muda para `cancelado_pelo_morador`; os cuidadores ainda recebem a notificação, mas com essa marcação — não é apagado (falso alarme também é informação de segurança).
+Then: o evento muda para `cancelado_pelo_morador`; os cuidadores recebem uma segunda notificação (tipo `sos_cancelado`) com essa marcação — não é apagado (falso alarme também é informação de segurança). Só quem acionou pode cancelar.
 API: `patchSOS`
 
 ### 2.7 Histórico e notificações
@@ -247,7 +253,7 @@ API: `patchSOS`
 
 Given: cuidador autenticado.
 When: abre o sino.
-Then: lista paginada, lida/não lida. Toque abre o alerta ou o SOS relacionado.
+Then: lista paginada (`limite` + cursor `antes`), lida/não lida, com título e mensagem prontos para exibir. Toque abre o alerta, o SOS ou o convite relacionado (convite tem botão "Aceitar").
 
 Regras: push nativo (fora do app) é obrigatório para SOS e para alertas de severidade alta; para severidade baixa, a V1 usa só a central dentro do app.
 API: `listNotificacoes` · `patchNotificacao`
@@ -321,11 +327,14 @@ Protocolo entre **app e servidor**: REST JSON. Protocolo entre **dispositivo e s
 | --------------------------------- | ------------------------------------------------- | --------------------------- |
 | Saúde                              | `GET /v1/health`                                   | `getHealth`                 |
 | Entrar (cuidador)                  | `POST /v1/auth`                                    | `postAuth`                  |
+| Criar conta (cuidador)             | `POST /v1/usuarios`                                | `postUsuario`               |
+| Registrar push do aparelho         | `POST /v1/usuarios/push-token`                     | `postPushToken`             |
 | Eu                                  | `GET /v1/me`                                       | `getMe`                     |
 | Minhas residências                 | `GET /v1/residencias`                              | `getMinhasResidencias`      |
 | Criar residência                   | `POST /v1/residencias`                             | `postResidencia`            |
 | Convidar cuidador                  | `POST /v1/residencias/{id}/convites`               | `postConvite`                |
 | Aceitar convite                    | `PATCH /v1/convites/{id}`                          | `patchConvite`               |
+| Listar moradores                   | `GET /v1/residencias/{id}/moradores`               | `listMoradores`               |
 | Cadastrar morador                  | `POST /v1/residencias/{id}/moradores`              | `postMorador`                 |
 | Login PIN (morador)                | `POST /v1/moradores/login-pin`                     | `postLoginPin`               |
 | Parear dispositivo                 | `POST /v1/residencias/{id}/dispositivos/parear`    | `postPareamento`             |
@@ -336,8 +345,9 @@ Protocolo entre **app e servidor**: REST JSON. Protocolo entre **dispositivo e s
 | Listar regras                      | `GET /v1/residencias/{id}/regras`                  | `listRegras`                 |
 | Listar alertas                     | `GET /v1/residencias/{id}/alertas`                 | `listAlertas`                |
 | Reconhecer alerta                  | `PATCH /v1/alertas/{id}`                           | `patchAlerta`                |
+| Listar SOS (cuidador)              | `GET /v1/residencias/{id}/sos`                     | `listSOS`                    |
 | Acionar SOS                        | `POST /v1/residencias/{id}/sos`                    | `postSOS`                    |
-| Cancelar SOS                       | `PATCH /v1/sos/{id}`                               | `patchSOS`                   |
+| Cancelar SOS / reconhecer SOS      | `PATCH /v1/sos/{id}`                               | `patchSOS`                   |
 | Central de notificações            | `GET /v1/notificacoes`                             | `listNotificacoes`           |
 | Marcar notificação lida            | `PATCH /v1/notificacoes/{id}`                      | `patchNotificacao`           |
 
@@ -373,41 +383,59 @@ A V1 é relacional: uma residência tem muitos dispositivos e muitos cuidadores;
 ### 6.2 Tabelas
 
 ```
-usuarios              id, nome, email, senha_hash, created_at
+usuarios              id, nome, email, senha_hash, push_token, created_at
 residencias           id, nome, endereco_curto, created_at
 residencia_membros    residencia_id, usuario_id, papel (dono|cuidador), created_at
-moradores             id, residencia_id, nome, pin_hash, created_at
+                      (único por residencia_id + usuario_id)
+moradores             id, residencia_id, nome, pin_hash,
+                      tentativas_erradas, primeira_tentativa_errada_em,
+                      bloqueado_ate, created_at
 convites              id, residencia_id, email, status (pendente|aceito), created_at
 dispositivos          id, residencia_id, tipo, nome, comodo, device_key,
                       estado_atual (jsonb), status (online|offline),
                       ultimo_contato_em, created_at
-regras_alerta         id, dispositivo_id, condicao, parametros (jsonb),
-                      ativa, created_at
+pareamentos           id, codigo, tipo, chave (hex, anunciada pelo dispositivo),
+                      expira_em, conflito, dispositivo_id, usado_em,
+                      confirmado_em, created_at
+regras_alerta         id, residencia_id, dispositivo_id, condicao,
+                      parametros (jsonb), ativa, created_at
 alertas               id, residencia_id, regra_id, dispositivo_id,
-                      severidade, status (aberto|reconhecido),
+                      severidade, status (aberto|reconhecido), nota,
                       reconhecido_por, reconhecido_em, created_at
-sos_eventos           id, residencia_id, morador_id, origem (app|botao_fisico),
+sos_eventos           id, residencia_id, morador_id, dispositivo_id,
+                      origem (app|botao_fisico),
                       status (aberto|cancelado_pelo_morador|reconhecido),
-                      created_at
+                      reconhecido_por, reconhecido_em, created_at
 eventos_dispositivo   id, dispositivo_id, tipo, valor (jsonb), created_at
-notificacoes          id, usuario_id, tipo, alvo_id, lida_em, created_at
+notificacoes          id, usuario_id, residencia_id, tipo, alvo_id,
+                      titulo, mensagem, lida_em, created_at
 ```
 
 O banco não guarda imagem nem áudio — nenhum dispositivo da V1 produz mídia (RNF-12).
 
 ### 6.3 Comunicação com os dispositivos (MQTT)
 
-Cada dispositivo recebe, no pareamento, uma `device_key` usada como credencial MQTT (TLS obrigatório, RNF-07).
+Cada dispositivo recebe, no pareamento, uma credencial MQTT própria: usuário = `dispositivo_id`, senha = `device_key` (TLS em produção, RNF-07). O broker roda sem acesso anônimo, com o plugin *dynamic security* do Mosquitto: o servidor cria um papel por dispositivo que só deixa publicar nos próprios tópicos e assinar o próprio `.../comando`.
 
 ```
 Tópicos (por dispositivo):
 cuidalar/{residencia_id}/{dispositivo_id}/estado      — dispositivo publica leitura/estado
-cuidalar/{residencia_id}/{dispositivo_id}/heartbeat   — dispositivo publica a cada 60s
-cuidalar/{residencia_id}/{dispositivo_id}/comando     — servidor publica, dispositivo assina
+cuidalar/{residencia_id}/{dispositivo_id}/heartbeat   — dispositivo publica a cada 60s, payload {}
+cuidalar/{residencia_id}/{dispositivo_id}/comando     — servidor publica {"acao":"ligar"|"desligar"}, dispositivo assina
 cuidalar/{residencia_id}/{dispositivo_id}/sos         — só para botao_sos, QoS 1
+
+Tópicos de pareamento (usuário MQTT compartilhado `provisionamento`, só estes dois):
+cuidalar/pareamento/{codigo}/anuncio      — dispositivo publica a cada 30s enquanto espera
+                                            {"tipo": "<tipo>", "chave": "<64 hex = 32 bytes aleatórios>"}
+cuidalar/pareamento/{codigo}/credenciais  — servidor publica (retido, QoS 1) quando o cuidador pareia:
+                                            {"iv": "<24 hex>", "dados": "<hex>", "tag": "<32 hex>"}
+                                            = AES-256-GCM, chave = "chave" do anúncio, texto claro =
+                                            {"residenciaId": "...", "dispositivoId": "...", "deviceKey": "..."}
 ```
 
-Um serviço no backend assina `.../estado` e `.../sos` de todos os dispositivos, grava em `eventos_dispositivo`, atualiza `dispositivos.estado_atual` e roda o motor de regras (RF-13). Comandos do app (RF-10) viram uma publicação em `.../comando`; o dispositivo confirma publicando o novo estado em `.../estado`, e é essa confirmação — não o envio do comando — que o app mostra como sucesso.
+O servidor apaga a mensagem retida de credenciais quando o dispositivo fala pela primeira vez com a credencial nova (ou quando o código expira).
+
+Um serviço no backend assina `.../estado`, `.../heartbeat`, `.../sos` e `cuidalar/pareamento/+/anuncio`, valida o payload com Zod e confere que o dispositivo existe e pertence àquela residência (mensagem que não bate é descartada). Ele grava em `eventos_dispositivo`, atualiza `dispositivos.estado_atual` e roda o motor de regras (RF-13). Comandos do app (RF-10) viram uma publicação em `.../comando`; o dispositivo confirma publicando o novo estado em `.../estado`, e é essa confirmação — não o envio do comando — que o app mostra como sucesso.
 
 ### 6.4 Camadas no cliente mobile
 
@@ -420,7 +448,7 @@ A tela não chama a rede direto. O servidor é dono de id, status e estado do di
 
 ### 6.5 Firmware (ESP32)
 
-Fora do escopo deste SPEC (que cobre app + API), mas a referência de contrato para quem escreve o firmware é a seção 6.3: payload de `.../estado` deve ser um JSON pequeno e estável por tipo de dispositivo (ex.: `{"presenca": true}`, `{"temperatura": 23.4, "umidade": 55}`, `{"contato": "aberto"}`, `{"tomada": "ligada"}`). Mudança de payload é mudança de contrato — atualizar esta seção no mesmo commit do firmware.
+Fora do escopo deste SPEC (que cobre app + API), mas a referência de contrato para quem escreve o firmware é a seção 6.3: payload de `.../estado` deve ser um JSON pequeno e estável por tipo de dispositivo — `sensor_presenca` `{"presenca": true}`, `sensor_temperatura` `{"temperatura": 23.4, "umidade": 55}`, `sensor_contato` `{"contato": "aberto"|"fechado"}`, `atuador_tomada` `{"tomada": "ligada"|"desligada"}`; `botao_sos` publica em `.../sos` `{"emergencia": true}`. Payload que não segue isso é descartado pelo servidor. Mudança de payload é mudança de contrato — atualizar esta seção no mesmo commit do firmware.
 
 ---
 

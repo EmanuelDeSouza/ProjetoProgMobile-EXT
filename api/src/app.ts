@@ -1,7 +1,9 @@
-import { verifyAuthToken, type TokenPayload } from "./auth";
+import { verifyAuthToken } from "./auth";
+import { sessaoDoToken, sessaoValida, type Sessao } from "./authz";
+import { HttpError } from "./http";
 import { formatErrorResponse } from "./schemas";
 import { handleHealth } from "./routes/health";
-import { handleAuth, handleMe } from "./routes/auth";
+import { handleAuth, handleMe, handlePostUsuario } from "./routes/auth";
 import { handlePostPushToken } from "./routes/usuarios";
 import {
   handleGetMinhasResidencias,
@@ -9,7 +11,7 @@ import {
   handlePostConvite,
   handlePatchConvite,
 } from "./routes/residencias";
-import { handlePostMorador, handlePostLoginPin } from "./routes/moradores";
+import { handleListMoradores, handlePostMorador, handlePostLoginPin } from "./routes/moradores";
 import {
   handlePostPareamento,
   handleListDispositivos,
@@ -18,194 +20,123 @@ import {
 } from "./routes/dispositivos";
 import { handleListRegras, handlePostRegra } from "./routes/regras";
 import { handleListAlertas, handlePatchAlerta } from "./routes/alertas";
-import { handlePostSOS, handlePatchSOS } from "./routes/sos";
+import { handleListSOS, handlePostSOS, handlePatchSOS } from "./routes/sos";
 import { handleListNotificacoes, handlePatchNotificacao } from "./routes/notificacoes";
 
-function corsHeaders(): HeadersInit {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
-  };
+export interface Contexto {
+  req: Request;
+  url: URL;
+  params: string[];
+  sessao: Sessao;
 }
 
+type HandlerPublico = (req: Request) => Promise<Response>;
+type HandlerAutenticado = (ctx: Contexto) => Promise<Response>;
+
+interface Rota {
+  method: string;
+  pattern: RegExp;
+  publica?: HandlerPublico;
+  autenticada?: HandlerAutenticado;
+}
+
+const seg = "([^/]+)";
+const rotas: Rota[] = [
+  // Públicas (AGENTS.md): health, auth, cadastro, login-pin
+  { method: "GET", pattern: /^\/v1\/health$/, publica: () => handleHealth() },
+  { method: "POST", pattern: /^\/v1\/auth$/, publica: handleAuth },
+  { method: "POST", pattern: /^\/v1\/usuarios$/, publica: handlePostUsuario },
+  { method: "POST", pattern: /^\/v1\/moradores\/login-pin$/, publica: handlePostLoginPin },
+
+  { method: "GET", pattern: /^\/v1\/me$/, autenticada: handleMe },
+  { method: "POST", pattern: /^\/v1\/usuarios\/push-token$/, autenticada: handlePostPushToken },
+  { method: "GET", pattern: /^\/v1\/residencias$/, autenticada: handleGetMinhasResidencias },
+  { method: "POST", pattern: /^\/v1\/residencias$/, autenticada: handlePostResidencia },
+  { method: "POST", pattern: new RegExp(`^/v1/residencias/${seg}/convites$`), autenticada: handlePostConvite },
+  { method: "PATCH", pattern: new RegExp(`^/v1/convites/${seg}$`), autenticada: handlePatchConvite },
+  { method: "GET", pattern: new RegExp(`^/v1/residencias/${seg}/moradores$`), autenticada: handleListMoradores },
+  { method: "POST", pattern: new RegExp(`^/v1/residencias/${seg}/moradores$`), autenticada: handlePostMorador },
+  { method: "POST", pattern: new RegExp(`^/v1/residencias/${seg}/dispositivos/parear$`), autenticada: handlePostPareamento },
+  { method: "GET", pattern: new RegExp(`^/v1/residencias/${seg}/dispositivos$`), autenticada: handleListDispositivos },
+  { method: "POST", pattern: new RegExp(`^/v1/dispositivos/${seg}/comando$`), autenticada: handlePostComando },
+  { method: "GET", pattern: new RegExp(`^/v1/dispositivos/${seg}/eventos$`), autenticada: handleListEventosDispositivo },
+  { method: "GET", pattern: new RegExp(`^/v1/residencias/${seg}/regras$`), autenticada: handleListRegras },
+  { method: "POST", pattern: new RegExp(`^/v1/residencias/${seg}/regras$`), autenticada: handlePostRegra },
+  { method: "GET", pattern: new RegExp(`^/v1/residencias/${seg}/alertas$`), autenticada: handleListAlertas },
+  { method: "PATCH", pattern: new RegExp(`^/v1/alertas/${seg}$`), autenticada: handlePatchAlerta },
+  { method: "GET", pattern: new RegExp(`^/v1/residencias/${seg}/sos$`), autenticada: handleListSOS },
+  { method: "POST", pattern: new RegExp(`^/v1/residencias/${seg}/sos$`), autenticada: handlePostSOS },
+  { method: "PATCH", pattern: new RegExp(`^/v1/sos/${seg}$`), autenticada: handlePatchSOS },
+  { method: "GET", pattern: /^\/v1\/notificacoes$/, autenticada: handleListNotificacoes },
+  { method: "PATCH", pattern: new RegExp(`^/v1/notificacoes/${seg}$`), autenticada: handlePatchNotificacao },
+];
+
+const CORS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+};
+
 function withCors(res: Response): Response {
-  const newHeaders = new Headers(res.headers);
-  const cors = corsHeaders();
-  for (const [key, value] of Object.entries(cors)) {
-    newHeaders.set(key, value);
+  const headers = new Headers(res.headers);
+  for (const [k, v] of Object.entries(CORS)) headers.set(k, v);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+const naoAutenticado = (msg: string) =>
+  Response.json(formatErrorResponse("UNAUTHORIZED", msg), { status: 401 });
+
+async function despachar(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+
+  let rota: Rota | undefined;
+  let params: string[] = [];
+  let pathExiste = false;
+  for (const r of rotas) {
+    const m = path.match(r.pattern);
+    if (!m) continue;
+    pathExiste = true;
+    if (r.method === req.method) {
+      rota = r;
+      params = m.slice(1).map((p) => decodeURIComponent(p));
+      break;
+    }
   }
-  return new Response(res.body, {
-    status: res.status,
-    statusText: res.statusText,
-    headers: newHeaders,
-  });
+
+  if (!rota) {
+    if (pathExiste) {
+      return Response.json(formatErrorResponse("METHOD_NOT_ALLOWED", "Método não permitido nesta rota."), {
+        status: 405,
+      });
+    }
+  }
+
+  if (rota?.publica) return rota.publica(req);
+
+  // Daqui para baixo tudo exige Bearer — inclusive rota inexistente (não revela o mapa da API).
+  const auth = req.headers.get("Authorization");
+  if (!auth || !auth.startsWith("Bearer ")) return naoAutenticado("Token de autenticação ausente ou inválido.");
+  const payload = await verifyAuthToken(auth.slice(7).trim());
+  if (!payload) return naoAutenticado("Token de autenticação inválido ou expirado.");
+  const sessao = sessaoDoToken(payload);
+  if (!(await sessaoValida(sessao))) return naoAutenticado("Sessão não existe mais. Entre de novo.");
+
+  if (!rota?.autenticada) {
+    return Response.json(formatErrorResponse("NOT_FOUND", `Rota ${req.method} ${path} não encontrada.`), {
+      status: 404,
+    });
+  }
+  return rota.autenticada({ req, url, params, sessao });
 }
 
 export async function handleRequest(req: Request): Promise<Response> {
-  if (req.method === "OPTIONS") {
-    return withCors(new Response(null, { status: 204 }));
-  }
-
+  if (req.method === "OPTIONS") return withCors(new Response(null, { status: 204 }));
   try {
-    const url = new URL(req.url);
-    const path = url.pathname;
-    const method = req.method;
-
-    // Public routes (RNF-10: prefix /v1)
-    if (method === "GET" && path === "/v1/health") {
-      return withCors(await handleHealth());
-    }
-
-    if (method === "POST" && path === "/v1/auth") {
-      return withCors(await handleAuth(req));
-    }
-
-    if (method === "POST" && path === "/v1/moradores/login-pin") {
-      return withCors(await handlePostLoginPin(req));
-    }
-
-    // Authenticated routes require Bearer token
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return withCors(
-        Response.json(
-          formatErrorResponse("UNAUTHORIZED", "Token de autenticação ausente ou inválido."),
-          { status: 401 }
-        )
-      );
-    }
-
-    const token = authHeader.replace("Bearer ", "").trim();
-    const tokenPayload: TokenPayload | null = await verifyAuthToken(token);
-    if (!tokenPayload) {
-      return withCors(
-        Response.json(
-          formatErrorResponse("UNAUTHORIZED", "Token de autenticação inválido ou expirado."),
-          { status: 401 }
-        )
-      );
-    }
-
-    const userId = tokenPayload.sub;
-
-    // /v1/me
-    if (method === "GET" && path === "/v1/me") {
-      return withCors(await handleMe(userId));
-    }
-
-    // /v1/usuarios/push-token
-    if (method === "POST" && path === "/v1/usuarios/push-token") {
-      return withCors(await handlePostPushToken(req, userId));
-    }
-
-    // /v1/residencias
-    if (method === "GET" && path === "/v1/residencias") {
-      return withCors(await handleGetMinhasResidencias(userId));
-    }
-    if (method === "POST" && path === "/v1/residencias") {
-      return withCors(await handlePostResidencia(req, userId));
-    }
-
-    // Match /v1/residencias/:id/convites
-    const matchConvites = path.match(/^\/v1\/residencias\/([^/]+)\/convites$/);
-    if (matchConvites?.[1] && method === "POST") {
-      return withCors(await handlePostConvite(req, matchConvites[1], userId));
-    }
-
-    // Match /v1/convites/:id
-    const matchPatchConvite = path.match(/^\/v1\/convites\/([^/]+)$/);
-    if (matchPatchConvite?.[1] && method === "PATCH") {
-      return withCors(await handlePatchConvite(req, matchPatchConvite[1], userId));
-    }
-
-    // Match /v1/residencias/:id/moradores
-    const matchMoradores = path.match(/^\/v1\/residencias\/([^/]+)\/moradores$/);
-    if (matchMoradores?.[1] && method === "POST") {
-      return withCors(await handlePostMorador(req, matchMoradores[1]));
-    }
-
-    // Match /v1/residencias/:id/dispositivos/parear
-    const matchParear = path.match(/^\/v1\/residencias\/([^/]+)\/dispositivos\/parear$/);
-    if (matchParear?.[1] && method === "POST") {
-      return withCors(await handlePostPareamento(req, matchParear[1]));
-    }
-
-    // Match /v1/residencias/:id/dispositivos
-    const matchListDispositivos = path.match(/^\/v1\/residencias\/([^/]+)\/dispositivos$/);
-    if (matchListDispositivos?.[1] && method === "GET") {
-      return withCors(await handleListDispositivos(matchListDispositivos[1]));
-    }
-
-    // Match /v1/dispositivos/:id/comando
-    const matchComando = path.match(/^\/v1\/dispositivos\/([^/]+)\/comando$/);
-    if (matchComando?.[1] && method === "POST") {
-      return withCors(await handlePostComando(req, matchComando[1]));
-    }
-
-    // Match /v1/dispositivos/:id/eventos
-    const matchEventos = path.match(/^\/v1\/dispositivos\/([^/]+)\/eventos$/);
-    if (matchEventos?.[1] && method === "GET") {
-      return withCors(await handleListEventosDispositivo(matchEventos[1]));
-    }
-
-    // Match /v1/residencias/:id/regras
-    const matchRegras = path.match(/^\/v1\/residencias\/([^/]+)\/regras$/);
-    if (matchRegras?.[1] && method === "GET") {
-      return withCors(await handleListRegras(matchRegras[1]));
-    }
-    if (matchRegras?.[1] && method === "POST") {
-      return withCors(await handlePostRegra(req, matchRegras[1]));
-    }
-
-    // Match /v1/residencias/:id/alertas
-    const matchAlertas = path.match(/^\/v1\/residencias\/([^/]+)\/alertas$/);
-    if (matchAlertas?.[1] && method === "GET") {
-      return withCors(await handleListAlertas(matchAlertas[1]));
-    }
-
-    // Match /v1/alertas/:id
-    const matchPatchAlerta = path.match(/^\/v1\/alertas\/([^/]+)$/);
-    if (matchPatchAlerta?.[1] && method === "PATCH") {
-      return withCors(await handlePatchAlerta(req, matchPatchAlerta[1], userId));
-    }
-
-    // Match /v1/residencias/:id/sos
-    const matchPostSOS = path.match(/^\/v1\/residencias\/([^/]+)\/sos$/);
-    if (matchPostSOS?.[1] && method === "POST") {
-      return withCors(await handlePostSOS(req, matchPostSOS[1]));
-    }
-
-    // Match /v1/sos/:id
-    const matchPatchSOS = path.match(/^\/v1\/sos\/([^/]+)$/);
-    if (matchPatchSOS?.[1] && method === "PATCH") {
-      return withCors(await handlePatchSOS(req, matchPatchSOS[1]));
-    }
-
-    // /v1/notificacoes
-    if (method === "GET" && path === "/v1/notificacoes") {
-      return withCors(await handleListNotificacoes(userId));
-    }
-
-    // Match /v1/notificacoes/:id
-    const matchPatchNotificacao = path.match(/^\/v1\/notificacoes\/([^/]+)$/);
-    if (matchPatchNotificacao?.[1] && method === "PATCH") {
-      return withCors(await handlePatchNotificacao(req, matchPatchNotificacao[1], userId));
-    }
-
-    return withCors(
-      Response.json(
-        formatErrorResponse("NOT_FOUND", `Rota ${method} ${path} não encontrada.`),
-        { status: 404 }
-      )
-    );
+    return withCors(await despachar(req));
   } catch (err) {
+    if (err instanceof HttpError) return withCors(err.toResponse());
     console.error("Erro não tratado na requisição:", err);
-    return withCors(
-      Response.json(
-        formatErrorResponse("INTERNAL_ERROR", "Erro interno do servidor."),
-        { status: 500 }
-      )
-    );
+    return withCors(Response.json(formatErrorResponse("INTERNAL_ERROR", "Erro interno do servidor."), { status: 500 }));
   }
 }

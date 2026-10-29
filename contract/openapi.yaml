@@ -1,10 +1,17 @@
 openapi: 3.0.3
 info:
   title: CuidaLar API
-  version: "1.0"
+  version: "1.1"
   description: >
     Contrato HTTP entre o app (cuidador e morador) e o servidor.
-    Comunicação com dispositivos IoT é via MQTT e está descrita em docs/SPEC.md secao 6.3, não aqui.
+    Comunicação com dispositivos IoT (inclusive o pareamento) é via MQTT e está descrita em
+    docs/SPEC.md seção 6.3, não aqui.
+
+    Dois tipos de sessão usam o mesmo header `Authorization: Bearer`:
+    o token do cuidador (emitido por postAuth/postUsuario) e o token do morador
+    (emitido por postLoginPin). Cada operação diz quem pode chamá-la em `x-sessao`.
+    Sessão errada para a operação → 403 FORBIDDEN. Recurso de residência da qual
+    a sessão não faz parte → 403 FORBIDDEN. Id malformado ou inexistente → 404 NOT_FOUND.
 servers:
   - url: http://localhost:3000/v1
     description: Local
@@ -16,8 +23,9 @@ paths:
   /health:
     get:
       operationId: getHealth
-      summary: Saúde do servidor
+      summary: Saúde do servidor (200 só se Postgres e broker respondem)
       security: []
+      x-sessao: publica
       responses:
         "200":
           description: OK
@@ -27,12 +35,15 @@ paths:
                 type: object
                 properties:
                   status: { type: string, example: ok }
+        "503":
+          description: Postgres ou broker fora do ar
 
   /auth:
     post:
       operationId: postAuth
       summary: Login do cuidador (e-mail/senha ou Google)
       security: []
+      x-sessao: publica
       requestBody:
         required: true
         content:
@@ -43,25 +54,61 @@ paths:
               properties:
                 metodo: { type: string, enum: [senha, google] }
                 email: { type: string, format: email }
-                senha: { type: string }
-                idToken: { type: string, description: "obrigatório se metodo=google" }
+                senha: { type: string, minLength: 6 }
+                idToken: { type: string, description: "obrigatório se metodo=google (ID token do Google Sign-In)" }
       responses:
         "200":
           description: Login OK
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  token: { type: string }
-                  usuario: { $ref: "#/components/schemas/Usuario" }
-        "401":
+              schema: { $ref: "#/components/schemas/SessaoCuidador" }
+        "400":
           $ref: "#/components/responses/Error"
+        "401":
+          description: Credenciais inválidas (e-mail sem conta também é 401 — não cria conta)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /usuarios:
+    post:
+      operationId: postUsuario
+      summary: Criar conta de cuidador (e-mail/senha)
+      description: >
+        Cria a conta e já devolve a sessão. Convites pendentes para este e-mail
+        são aceitos automaticamente (RF-05: "se não tem conta, se cadastra e já entra vinculado").
+      security: []
+      x-sessao: publica
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nome, email, senha]
+              properties:
+                nome: { type: string, minLength: 1 }
+                email: { type: string, format: email }
+                senha: { type: string, minLength: 6 }
+      responses:
+        "201":
+          description: Conta criada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessaoCuidador" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: E-mail já cadastrado (EMAIL_IN_USE)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /me:
     get:
       operationId: getMe
       summary: Usuário autenticado
+      x-sessao: cuidador
       responses:
         "200":
           description: OK
@@ -75,9 +122,8 @@ paths:
   /usuarios/push-token:
     post:
       operationId: postPushToken
-      summary: Registrar token push do cuidador para notificações nativas
-      security:
-        - bearerAuth: []
+      summary: Registrar token push (Expo) do aparelho do cuidador
+      x-sessao: cuidador
       requestBody:
         required: true
         content:
@@ -89,7 +135,7 @@ paths:
                 pushToken: { type: string, example: "ExponentPushToken[xxxxxx]" }
       responses:
         "200":
-          description: Token push registrado com sucesso
+          description: Token registrado
           content:
             application/json:
               schema:
@@ -105,6 +151,7 @@ paths:
     get:
       operationId: getMinhasResidencias
       summary: Residências do cuidador autenticado, com papel
+      x-sessao: cuidador
       responses:
         "200":
           description: OK
@@ -116,7 +163,8 @@ paths:
                   $ref: "#/components/schemas/ResidenciaComPapel"
     post:
       operationId: postResidencia
-      summary: Criar residência
+      summary: Criar residência (criador vira dono)
+      x-sessao: cuidador
       requestBody:
         required: true
         content:
@@ -140,6 +188,10 @@ paths:
     post:
       operationId: postConvite
       summary: Convidar outro cuidador
+      description: >
+        Se o e-mail já tem conta, ele recebe uma notificação do tipo `convite`
+        (alvoId = id do convite) e aceita com patchConvite.
+      x-sessao: cuidador (membro da residência)
       parameters:
         - $ref: "#/components/parameters/ResidenciaId"
       requestBody:
@@ -153,19 +205,30 @@ paths:
                 email: { type: string, format: email }
       responses:
         "201":
-          description: Convite criado
+          description: Convite criado (ou o pendente já existente)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Convite" }
+        "400":
+          $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+        "409":
+          description: Esse e-mail já é cuidador desta residência (ALREADY_MEMBER)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /convites/{id}:
     patch:
       operationId: patchConvite
-      summary: Aceitar convite
+      summary: Aceitar convite (só o dono do e-mail convidado)
+      x-sessao: cuidador (e-mail igual ao do convite)
       parameters:
         - name: id
           in: path
           required: true
-          schema: { type: string }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -178,11 +241,40 @@ paths:
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenciaComPapel" }
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: Convite já aceito (INVITE_NOT_PENDING)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /residencias/{id}/moradores:
+    get:
+      operationId: listMoradores
+      summary: Moradores da residência (para configurar o aparelho da casa)
+      x-sessao: cuidador (membro da residência)
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Morador" }
+        "403":
+          $ref: "#/components/responses/Error"
     post:
       operationId: postMorador
       summary: Cadastrar perfil de morador com PIN
+      x-sessao: cuidador (membro da residência)
       parameters:
         - $ref: "#/components/parameters/ResidenciaId"
       requestBody:
@@ -201,12 +293,20 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Morador" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
 
   /moradores/login-pin:
     post:
       operationId: postLoginPin
       summary: Login simplificado do morador
+      description: >
+        O aparelho da casa guarda o moradorId (configurado uma vez pelo cuidador);
+        o morador só digita o PIN.
       security: []
+      x-sessao: publica
       requestBody:
         required: true
         content:
@@ -215,8 +315,8 @@ paths:
               type: object
               required: [moradorId, pin]
               properties:
-                moradorId: { type: string }
-                pin: { type: string }
+                moradorId: { type: string, format: uuid }
+                pin: { type: string, pattern: "^[0-9]{4}$" }
       responses:
         "200":
           description: OK
@@ -227,15 +327,25 @@ paths:
                 properties:
                   token: { type: string }
                   morador: { $ref: "#/components/schemas/Morador" }
+        "400":
+          $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
         "429":
-          description: Bloqueado temporariamente por tentativas erradas (RNF-08)
+          description: Bloqueado temporariamente — 5 tentativas erradas em 10 minutos (RNF-08)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /residencias/{id}/dispositivos/parear:
     post:
       operationId: postPareamento
-      summary: Parear dispositivo com código gerado pelo firmware
+      summary: Parear dispositivo com código anunciado pelo firmware
+      description: >
+        O código de 6 dígitos só é aceito se o dispositivo o anunciou pelo MQTT
+        nos últimos 10 minutos (SPEC 6.3). As credenciais MQTT vão para o
+        dispositivo pelo broker, nunca pelo app.
+      x-sessao: cuidador (membro da residência)
       parameters:
         - $ref: "#/components/parameters/ResidenciaId"
       requestBody:
@@ -246,10 +356,9 @@ paths:
               type: object
               required: [codigo, tipo, nome, comodo]
               properties:
-                codigo: { type: string, description: "código de 6 dígitos exibido pelo dispositivo" }
+                codigo: { type: string, pattern: "^[0-9]{6}$", description: "código de 6 dígitos exibido pelo dispositivo" }
                 tipo:
-                  type: string
-                  enum: [sensor_presenca, sensor_contato, sensor_temperatura, atuador_tomada, botao_sos]
+                  $ref: "#/components/schemas/TipoDispositivo"
                 nome: { type: string }
                 comodo: { type: string }
       responses:
@@ -258,13 +367,29 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Dispositivo" }
+        "400":
+          description: Validação (inclui tipo diferente do que o dispositivo anunciou)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Error"
         "409":
-          description: Código expirado ou já usado
+          description: Código expirado, já usado ou desconhecido (PAIRING_CODE_INVALID)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Broker indisponível, credencial não pôde ser emitida (BROKER_UNAVAILABLE)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /residencias/{id}/dispositivos:
     get:
       operationId: listDispositivos
       summary: Painel — dispositivos da residência com estado atual
+      x-sessao: cuidador (membro) ou morador (da residência)
       parameters:
         - $ref: "#/components/parameters/ResidenciaId"
       responses:
@@ -275,16 +400,22 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Dispositivo" }
+        "403":
+          $ref: "#/components/responses/Error"
 
   /dispositivos/{id}/comando:
     post:
       operationId: postComandoDispositivo
       summary: Enviar comando a um atuador
+      description: >
+        202 significa só "publicado no broker". Sucesso para a pessoa é quando
+        `estadoAtual` muda (confirmação do dispositivo pelo tópico .../estado).
+      x-sessao: cuidador (membro) ou morador (da residência)
       parameters:
         - name: id
           in: path
           required: true
-          schema: { type: string }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -293,22 +424,40 @@ paths:
               type: object
               required: [acao]
               properties:
-                acao: { type: string, example: "ligar" }
+                acao: { type: string, enum: [ligar, desligar] }
       responses:
         "202":
           description: Comando enviado, aguardando confirmação do dispositivo via MQTT
+        "400":
+          description: Ação inválida ou dispositivo que não aceita comando (DEVICE_NOT_ACTUATOR)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
         "409":
-          description: Dispositivo offline, comando recusado antes de enviar
+          description: Dispositivo offline, comando recusado antes de enviar (DEVICE_OFFLINE)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Broker indisponível, comando não saiu (BROKER_UNAVAILABLE)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /dispositivos/{id}/eventos:
     get:
       operationId: listEventosDispositivo
-      summary: Histórico de eventos (últimos 7 dias)
+      summary: Histórico de eventos (últimos 7 dias, sem heartbeat)
+      x-sessao: cuidador (membro)
       parameters:
         - name: id
           in: path
           required: true
-          schema: { type: string }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: OK
@@ -317,10 +466,15 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/EventoDispositivo" }
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
 
   /residencias/{id}/regras:
     get:
       operationId: listRegras
+      x-sessao: cuidador (membro)
       parameters:
         - $ref: "#/components/parameters/ResidenciaId"
       responses:
@@ -331,8 +485,17 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/RegraAlerta" }
+        "403":
+          $ref: "#/components/responses/Error"
     post:
       operationId: postRegraAlerta
+      description: >
+        Parâmetros por condição —
+        sem_movimento_por: {horas} (0.25 a 48), só sensor_presenca;
+        contato_aberto_apos_horario: {horario: "HH:MM", horarioFim?: "HH:MM" (padrão 06:00)}, só sensor_contato;
+        temperatura_fora_da_faixa: {min, max} em °C, min < max, só sensor_temperatura;
+        dispositivo_offline: {} qualquer tipo.
+      x-sessao: cuidador (membro)
       parameters:
         - $ref: "#/components/parameters/ResidenciaId"
       requestBody:
@@ -343,10 +506,9 @@ paths:
               type: object
               required: [dispositivoId, condicao, parametros]
               properties:
-                dispositivoId: { type: string }
+                dispositivoId: { type: string, format: uuid }
                 condicao:
-                  type: string
-                  enum: [sem_movimento_por, contato_aberto_apos_horario, temperatura_fora_da_faixa, dispositivo_offline]
+                  $ref: "#/components/schemas/CondicaoRegra"
                 parametros: { type: object }
       responses:
         "201":
@@ -354,10 +516,69 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RegraAlerta" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
 
   /residencias/{id}/alertas:
     get:
       operationId: listAlertas
+      x-sessao: cuidador (membro)
+      parameters:
+        - $ref: "#/components/parameters/ResidenciaId"
+      responses:
+        "200":
+          description: OK (abertos primeiro, depois mais recentes)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Alerta" }
+        "403":
+          $ref: "#/components/responses/Error"
+
+  /alertas/{id}:
+    patch:
+      operationId: patchAlerta
+      summary: Reconhecer alerta, ou escalar mantendo aberto com nota (RF-14)
+      x-sessao: cuidador (membro)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [reconhecido, aberto]
+                  description: "reconhecido = 'Verifiquei, está tudo bem'; aberto = 'Preciso de ajuda / escalar' (nota obrigatória)"
+                nota: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alerta" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /residencias/{id}/sos:
+    get:
+      operationId: listSOS
+      summary: SOS da residência (abertos primeiro)
+      x-sessao: cuidador (membro)
       parameters:
         - $ref: "#/components/parameters/ResidenciaId"
       responses:
@@ -367,35 +588,13 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { $ref: "#/components/schemas/Alerta" }
-
-  /alertas/{id}:
-    patch:
-      operationId: patchAlerta
-      summary: Reconhecer alerta
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [status]
-              properties:
-                status: { type: string, enum: [reconhecido] }
-                nota: { type: string }
-      responses:
-        "200":
-          description: OK
-
-  /residencias/{id}/sos:
+                items: { $ref: "#/components/schemas/SOSEvento" }
+        "403":
+          $ref: "#/components/responses/Error"
     post:
       operationId: postSOS
       summary: Acionar SOS pelo app do morador
+      x-sessao: morador (moradorId tem de ser o da sessão)
       parameters:
         - $ref: "#/components/parameters/ResidenciaId"
       requestBody:
@@ -406,23 +605,28 @@ paths:
               type: object
               required: [moradorId]
               properties:
-                moradorId: { type: string }
+                moradorId: { type: string, format: uuid }
       responses:
         "201":
           description: SOS registrado, notificação disparada
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SOSEvento" }
+        "403":
+          $ref: "#/components/responses/Error"
 
   /sos/{id}:
     patch:
       operationId: patchSOS
-      summary: Cancelar SOS acidental (até 30s depois)
+      summary: Morador cancela SOS acidental (até 30s) ou cuidador reconhece
+      x-sessao: >
+        morador (quem acionou) com cancelado_pelo_morador;
+        cuidador (membro) com reconhecido
       parameters:
         - name: id
           in: path
           required: true
-          schema: { type: string }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -431,16 +635,38 @@ paths:
               type: object
               required: [status]
               properties:
-                status: { type: string, enum: [cancelado_pelo_morador] }
+                status: { type: string, enum: [cancelado_pelo_morador, reconhecido] }
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SOSEvento" }
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
         "409":
-          description: Fora da janela de 30s para cancelamento
+          description: Fora da janela de 30s (SOS_CANCEL_TIMEOUT) ou SOS já encerrado (SOS_NOT_OPEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /notificacoes:
     get:
       operationId: listNotificacoes
+      summary: Central de notificações (paginada, mais recentes primeiro)
+      x-sessao: cuidador
+      parameters:
+        - name: limite
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+        - name: antes
+          in: query
+          required: false
+          description: Cursor — devolve só notificações criadas antes deste instante (createdAt do último item da página anterior)
+          schema: { type: string, format: date-time }
       responses:
         "200":
           description: OK
@@ -453,23 +679,30 @@ paths:
   /notificacoes/{id}:
     patch:
       operationId: patchNotificacao
-      summary: Marcar como lida
+      summary: Marcar como lida (ou não lida)
+      x-sessao: cuidador (dono da notificação)
       parameters:
         - name: id
           in: path
           required: true
-          schema: { type: string }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [lida]
               properties:
                 lida: { type: boolean }
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notificacao" }
+        "404":
+          $ref: "#/components/responses/Error"
 
 components:
   securitySchemes:
@@ -482,24 +715,34 @@ components:
       name: id
       in: path
       required: true
-      schema: { type: string }
+      schema: { type: string, format: uuid }
 
   responses:
     Error:
       description: Erro padrão
       content:
         application/json:
-          schema:
-            type: object
-            properties:
-              error:
-                type: object
-                properties:
-                  code: { type: string }
-                  message: { type: string }
-                  fields: { type: object }
+          schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            fields: { type: object, additionalProperties: { type: string } }
+
+    TipoDispositivo:
+      type: string
+      enum: [sensor_presenca, sensor_contato, sensor_temperatura, atuador_tomada, botao_sos]
+
+    CondicaoRegra:
+      type: string
+      enum: [sem_movimento_por, contato_aberto_apos_horario, temperatura_fora_da_faixa, dispositivo_offline]
+
     Usuario:
       type: object
       properties:
@@ -507,12 +750,18 @@ components:
         nome: { type: string }
         email: { type: string }
 
+    SessaoCuidador:
+      type: object
+      properties:
+        token: { type: string }
+        usuario: { $ref: "#/components/schemas/Usuario" }
+
     Residencia:
       type: object
       properties:
         id: { type: string }
         nome: { type: string }
-        enderecoCurto: { type: string }
+        enderecoCurto: { type: string, nullable: true }
 
     ResidenciaComPapel:
       allOf:
@@ -520,6 +769,15 @@ components:
         - type: object
           properties:
             papel: { type: string, enum: [dono, cuidador] }
+
+    Convite:
+      type: object
+      properties:
+        id: { type: string }
+        residenciaId: { type: string }
+        email: { type: string }
+        status: { type: string, enum: [pendente, aceito] }
+        createdAt: { type: string, format: date-time }
 
     Morador:
       type: object
@@ -532,14 +790,12 @@ components:
       type: object
       properties:
         id: { type: string }
-        tipo:
-          type: string
-          enum: [sensor_presenca, sensor_contato, sensor_temperatura, atuador_tomada, botao_sos]
+        tipo: { $ref: "#/components/schemas/TipoDispositivo" }
         nome: { type: string }
         comodo: { type: string }
         estadoAtual: { type: object }
         status: { type: string, enum: [online, offline] }
-        ultimoContatoEm: { type: string, format: date-time }
+        ultimoContatoEm: { type: string, format: date-time, nullable: true }
 
     EventoDispositivo:
       type: object
@@ -554,7 +810,7 @@ components:
       properties:
         id: { type: string }
         dispositivoId: { type: string }
-        condicao: { type: string }
+        condicao: { $ref: "#/components/schemas/CondicaoRegra" }
         parametros: { type: object }
         ativa: { type: boolean }
 
@@ -562,26 +818,36 @@ components:
       type: object
       properties:
         id: { type: string }
-        dispositivoId: { type: string }
-        regraId: { type: string }
+        dispositivoId: { type: string, nullable: true }
+        regraId: { type: string, nullable: true, description: "null = alerta de sistema (dispositivo crítico sem contato, RNF-13)" }
+        condicao: { type: string, nullable: true, description: "condição da regra que disparou; null em alerta de sistema" }
         severidade: { type: string, enum: [baixa, media, alta] }
         status: { type: string, enum: [aberto, reconhecido] }
+        nota: { type: string, nullable: true }
+        reconhecidoPor: { type: string, nullable: true, description: "nome de quem reconheceu" }
+        reconhecidoEm: { type: string, format: date-time, nullable: true }
         createdAt: { type: string, format: date-time }
 
     SOSEvento:
       type: object
       properties:
         id: { type: string }
-        moradorId: { type: string }
+        moradorId: { type: string, nullable: true }
+        dispositivoId: { type: string, nullable: true, description: "preenchido quando origem=botao_fisico" }
         origem: { type: string, enum: [app, botao_fisico] }
         status: { type: string, enum: [aberto, cancelado_pelo_morador, reconhecido] }
+        reconhecidoPor: { type: string, nullable: true, description: "nome de quem reconheceu" }
+        reconhecidoEm: { type: string, format: date-time, nullable: true }
         createdAt: { type: string, format: date-time }
 
     Notificacao:
       type: object
       properties:
         id: { type: string }
-        tipo: { type: string }
-        alvoId: { type: string }
+        tipo: { type: string, enum: [alerta, sos, sos_cancelado, convite] }
+        alvoId: { type: string, description: "id do alerta, do SOS ou do convite" }
+        residenciaId: { type: string }
+        titulo: { type: string }
+        mensagem: { type: string }
         lidaEm: { type: string, format: date-time, nullable: true }
         createdAt: { type: string, format: date-time }

@@ -10,7 +10,8 @@ import {
 } from "react-native";
 import { colors, typography, spacing, rounded } from "../../../theme/tokens";
 import { useResidence } from "../../context/ResidenceContext";
-import { apiRepository } from "../../services/api";
+import { apiRepository, mensagemDeErro } from "../../services/api";
+import { formPareamento, primeiroErro } from "../../services/schemas";
 import { type TipoDispositivo } from "../../types";
 
 interface ParearDispositivoScreenProps {
@@ -38,32 +39,20 @@ export const ParearDispositivoScreen: React.FC<ParearDispositivoScreenProps> = (
 
   const handlePair = async () => {
     if (!selectedResidencia) return;
-    if (codigo.trim().length !== 6) {
-      setError("O código deve ter 6 dígitos.");
-      return;
-    }
-    if (!nome.trim() || !comodo.trim()) {
-      setError("Preencha o nome e o cômodo do dispositivo.");
+    const parsed = formPareamento.safeParse({ codigo: codigo.trim(), tipo, nome, comodo });
+    if (!parsed.success) {
+      setError(primeiroErro(parsed.error));
       return;
     }
 
     setLoading(true);
     setError(null);
     try {
-      await apiRepository.postPareamento(selectedResidencia.id, {
-        codigo: codigo.trim(),
-        tipo,
-        nome: nome.trim(),
-        comodo: comodo.trim(),
-      });
+      await apiRepository.postPareamento(selectedResidencia.id, parsed.data);
       await refreshDispositivos();
       onBack();
     } catch (err: unknown) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Erro ao parear dispositivo. Código pode estar expirado."
-      );
+      setError(mensagemDeErro(err, "Erro ao parear dispositivo."));
     } finally {
       setLoading(false);
     }
@@ -77,7 +66,7 @@ export const ParearDispositivoScreen: React.FC<ParearDispositivoScreenProps> = (
 
       <Text style={styles.title}>Parear Dispositivo</Text>
       <Text style={styles.desc}>
-        Ligue o ESP32 em modo pareamento e digite o código de 6 dígitos exibido no visor ou console.
+        Ligue o dispositivo novo. Na primeira vez ele cria a rede Wi-Fi "CuidaLar-Setup": conecte o celular nela e informe o Wi-Fi da casa. Depois o dispositivo mostra um código de 6 números (no visor ou piscando o LED) — digite aqui em até 10 minutos.
       </Text>
 
       {error && (
@@ -94,7 +83,7 @@ export const ParearDispositivoScreen: React.FC<ParearDispositivoScreenProps> = (
         keyboardType="number-pad"
         maxLength={6}
         value={codigo}
-        onChangeText={setCodigo}
+        onChangeText={(t) => setCodigo(t.replace(/[^0-9]/g, ""))}
       />
 
       <Text style={styles.label}>Tipo de Dispositivo</Text>

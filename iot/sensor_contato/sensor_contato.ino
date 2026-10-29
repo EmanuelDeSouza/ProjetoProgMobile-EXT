@@ -1,85 +1,36 @@
 /*
-  CuidaLar - Sensor de Contato (ESP32 + Reed Switch / Magnético)
-  Contrato: SPEC.md seção 6.3
-  Tópicos:
-    - cuidalar/{residencia_id}/{dispositivo_id}/estado
-    - cuidalar/{residencia_id}/{dispositivo_id}/heartbeat
+  CuidaLar · Sensor de contato (porta/janela) — ESP32 + reed switch
+  Contrato: docs/SPEC.md 6.3 → .../estado {"contato":"aberto"|"fechado"}
+  Ligação: reed switch entre GPIO14 e GND (pull-up interno). Ímã encostado = fechado.
 */
-
-#include <WiFi.h>
-#include <PubSubClient.h>
-
-const char* WIFI_SSID = "SUA_REDE_WIFI";
-const char* WIFI_PASS = "SUA_SENHA_WIFI";
-const char* MQTT_BROKER = "192.168.1.100";
-const int MQTT_PORT = 1883;
-
-const char* RESIDENCIA_ID = "RESIDENCIA_UUID";
-const char* DISPOSITIVO_ID = "DISPOSITIVO_UUID";
-const char* DEVICE_KEY = "DEVICE_KEY";
+#include <CuidaLarCore.h>
 
 const int PIN_REED = 14;
+CuidaLar cuidalar("sensor_contato");
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+bool ultimoAberto = false;
+unsigned long ultimaMudanca = 0;
 
-char topicEstado[128];
-char topicHeartbeat[128];
-
-unsigned long lastHeartbeat = 0;
-String lastState = "";
+void publicar(bool aberto) {
+  cuidalar.publicarEstado(aberto ? "{\"contato\":\"aberto\"}" : "{\"contato\":\"fechado\"}");
+  Serial.printf("contato: %s\n", aberto ? "aberto" : "fechado");
+}
 
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_REED, INPUT_PULLUP);
-
-  snprintf(topicEstado, sizeof(topicEstado), "cuidalar/%s/%s/estado", RESIDENCIA_ID, DISPOSITIVO_ID);
-  snprintf(topicHeartbeat, sizeof(topicHeartbeat), "cuidalar/%s/%s/heartbeat", RESIDENCIA_ID, DISPOSITIVO_ID);
-
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi Conectado!");
-
-  client.setServer(MQTT_BROKER, MQTT_PORT);
-}
-
-void reconnect() {
-  while (!client.connected()) {
-    Serial.print("Conectando ao MQTT...");
-    if (client.connect(DISPOSITIVO_ID, DISPOSITIVO_ID, DEVICE_KEY)) {
-      Serial.println("Conectado!");
-    } else {
-      delay(5000);
-    }
-  }
+  cuidalar.onConectado([]() { publicar(digitalRead(PIN_REED) == HIGH); });
+  cuidalar.begin();
+  ultimoAberto = digitalRead(PIN_REED) == HIGH;
 }
 
 void loop() {
-  if (!client.connected()) {
-    reconnect();
+  cuidalar.loop();
+  bool aberto = digitalRead(PIN_REED) == HIGH;
+  // debounce de 200 ms: porta batendo não vira rajada de eventos
+  if (aberto != ultimoAberto && millis() - ultimaMudanca > 200) {
+    ultimaMudanca = millis();
+    ultimoAberto = aberto;
+    publicar(aberto);
   }
-  client.loop();
-
-  // HIGH = Aberto (ímã afastado), LOW = Fechado (ímã encostado)
-  bool isAberto = digitalRead(PIN_REED) == HIGH;
-  String currentState = isAberto ? "aberto" : "fechado";
-
-  if (currentState != lastState) {
-    lastState = currentState;
-    char payload[64];
-    snprintf(payload, sizeof(payload), "{\"contato\": \"%s\"}", currentState.c_str());
-    client.publish(topicEstado, payload, true);
-    Serial.printf("Contato publicado: %s\n", payload);
-  }
-
-  unsigned long now = millis();
-  if (now - lastHeartbeat >= 60000) {
-    lastHeartbeat = now;
-    client.publish(topicHeartbeat, "{\"status\": \"ok\"}");
-  }
-
-  delay(200);
 }

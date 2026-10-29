@@ -1,0 +1,6 @@
+# Gerado por expo prebuild / expo run:android (Continuous Native Generation)
+android/
+ios/
+.expo/
+.env
+node_modules/
