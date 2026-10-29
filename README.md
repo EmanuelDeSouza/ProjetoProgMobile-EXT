@@ -49,6 +49,10 @@ npx expo run:android      # build de desenvolvimento (push e armazenamento segur
 
 Login do seed: `cuidador@cuidalar.app` / `cuidador123`. Morador: Dona Elza, PIN `1234` — no app do cuidador, em **+ Morador**, toque em **Usar este aparelho para Dona Elza** para transformar o celular/tablet no painel dela.
 
+> **Windows com Postgres ou Mosquitto já instalados?** Eles ocupam as portas 5432/1883 e a API conecta no serviço errado (erro de senha do Postgres em português, ou `timeout esperando resposta do broker`). Copie `.env.example` para `.env` na raiz, use `POSTGRES_PORT=5433` e `MQTT_PORT=1884`, ajuste `DATABASE_URL` e `MQTT_BROKER_URL` no `api/.env` e rode `docker compose up -d` de novo. No Prompt do Windows use `copy` no lugar de `cp`.
+
+> **Windows: erro `ninja: error: mkdir ... No such file or directory` no build Android** é o limite de 260 caracteres de caminho. Deixe o projeto num caminho curto (ex.: `C:\cl\cuidalar`), ative `LongPathsEnabled` no registro e troque o `ninja.exe` de `Android\Sdk\cmake\3.22.1\bin` pela versão 1.12+.
+
 > Já tinha o banco de antes? `bun run db:migrate` aplica só a migration nova (0002) sem perder dados. O broker passa a exigir usuário e senha: rode `docker compose up -d --force-recreate mosquitto` uma vez para ele subir com a configuração nova.
 
 > Já tinha a pasta `app/android` gerada? Depois de puxar este branch rode `npx expo prebuild --clean` (entraram módulos nativos novos: notificações, armazenamento seguro, haptics).
